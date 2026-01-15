@@ -232,16 +232,4 @@ cd backend && python -c "from app.agents.router import QueryRouter; print('Route
 python scripts/qdrant_smoke_check.py --require AAPL
 ```
 
-## 📄 License
 
-MIT License - see LICENSE file for details.
-
-## 👤 Author
-
-**Arun K**
-- Portfolio project demonstrating AI engineering skills
-- Built for $150K+ AI/ML engineering roles
-
----
-
-*Built with ❤️ and lots of ☕*
