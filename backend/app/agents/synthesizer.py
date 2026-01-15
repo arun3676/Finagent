@@ -16,11 +16,19 @@ Usage:
 """
 
 from typing import List, Optional, Dict, Any
-from openai import AsyncOpenAI
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
 from app.config import settings
 from app.models import AgentState, RetrievedDocument, Citation, CitedResponse
 from app.agents.prompts import SYNTHESIZER_SYSTEM_PROMPT, SYNTHESIZER_USER_TEMPLATE
+from app.citations.utils import (
+    extract_context,
+    generate_preview_text,
+    format_source_metadata,
+    determine_validation_method
+)
 
 
 class Synthesizer:
@@ -39,7 +47,15 @@ class Synthesizer:
             model: LLM model to use
         """
         self.model = model or settings.LLM_MODEL
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        if settings.OPENAI_API_KEY:
+            self.llm = ChatOpenAI(
+                model=self.model,
+                api_key=settings.OPENAI_API_KEY,
+                temperature=settings.LLM_TEMPERATURE,
+                streaming=True
+            )
+        else:
+            self.llm = None
     
     async def synthesize(
         self,
@@ -49,49 +65,82 @@ class Synthesizer:
     ) -> CitedResponse:
         """
         Synthesize a cited response.
-        
-        Args:
-            query: Original user query
-            analysis: Analyzed data from analyst agent
-            documents: Source documents
-            
-        Returns:
-            CitedResponse with answer and citations
         """
-        # TODO: Implement synthesis pipeline
-        # 1. Format analysis and sources
-        # 2. Call LLM for response generation
-        # 3. Extract and link citations
-        # 4. Return CitedResponse
-        raise NotImplementedError("Synthesis pipeline not yet implemented")
-    
-    async def synthesize_for_state(self, state: AgentState) -> AgentState:
+        try:
+            if not self.llm:
+                # Fallback if no LLM configured
+                return CitedResponse(
+                    answer=f"I couldn't generate a response for '{query}' because the LLM is not configured.",
+                    citations=[],
+                    sources=[]
+                )
+
+            # If no documents, return a helpful message
+            if not documents:
+                return CitedResponse(
+                    answer=f"I couldn't find any SEC filing data to answer your question about '{query}'. Please try a different company or check if the company has public SEC filings.",
+                    citations=[],
+                    sources=[]
+                )
+
+            # 1. Format sources
+            formatted_sources = self._format_sources(documents)
+            
+            # 2. Generate response
+            response_text = await self._generate_response(
+                query, 
+                analysis, 
+                formatted_sources
+            )
+            
+            # 3. Extract citations
+            citations = self._extract_citations(response_text, documents)
+            
+            from app.models import DocumentMetadata
+            sources = [doc.chunk.metadata for doc in documents]
+            
+            return CitedResponse(
+                answer=response_text,
+                citations=citations,
+                sources=sources
+            )
+            
+        except Exception as e:
+            logger.error(f"Synthesizer LLM failed: {e}")
+            return CitedResponse(
+                answer=f"I encountered an error while processing your question about '{query}'. Please try again or contact support if the issue persists.",
+                citations=[],
+                sources=[]
+            )
+
+    async def synthesize_for_state(self, state: AgentState) -> Dict[str, Any]:
         """
         Synthesize response and update agent state.
-        
-        LangGraph-compatible interface.
-        
+
+        LangGraph-compatible interface - returns dict with updated fields.
+
         Args:
             state: Current agent state
-            
+
         Returns:
-            Updated state with draft response and citations
+            Dict with draft_response and citations fields for state update
         """
         response = await self.synthesize(
             state.original_query,
             state.extracted_data,
             state.retrieved_docs
         )
-        
-        state.draft_response = response.answer
-        state.citations = response.citations
-        return state
+
+        return {
+            "draft_response": response.answer,
+            "citations": response.citations
+        }
     
     async def _generate_response(
         self,
         query: str,
         analysis: Dict[str, Any],
-        sources: List[Dict[str, Any]]
+        sources: str
     ) -> str:
         """
         Generate response text using LLM.
@@ -99,16 +148,30 @@ class Synthesizer:
         Args:
             query: User query
             analysis: Analyzed data
-            sources: Formatted source information
+            sources: Formatted source information string
             
         Returns:
             Generated response with citation markers
         """
-        # TODO: Implement LLM response generation
-        # 1. Format prompt
-        # 2. Call LLM
-        # 3. Return response text
-        raise NotImplementedError("Response generation not yet implemented")
+        # Build prompt
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SYNTHESIZER_SYSTEM_PROMPT),
+            ("user", SYNTHESIZER_USER_TEMPLATE)
+        ])
+        
+        # Create chain
+        chain = prompt | self.llm | StrOutputParser()
+        
+        # Generate response
+        # Note: We use ainvoke here. The streaming events will be captured 
+        # by the parent graph's streamEvents
+        response_text = await chain.ainvoke({
+            "query": query,
+            "analysis": self._format_analysis(analysis),
+            "sources": sources
+        })
+        
+        return response_text
     
     def _extract_citations(
         self,
@@ -116,50 +179,99 @@ class Synthesizer:
         documents: List[RetrievedDocument]
     ) -> List[Citation]:
         """
-        Extract citations from response text.
-        
-        Finds [1], [2], etc. markers and links to sources.
-        
+        Extract citations from response text with enhanced metadata.
+
+        Finds [1], [2], etc. markers and links to sources with full context.
+
         Args:
             response: Response text with citation markers
             documents: Source documents
-            
+
         Returns:
-            List of Citation objects
+            List of Citation objects with enhanced fields
         """
         import re
-        
+
         citations = []
-        
+
         # Find all citation markers
         pattern = r'\[(\d+)\]'
         matches = re.finditer(pattern, response)
-        
-        for match in matches:
+
+        # Track unique citations (same doc might be cited multiple times)
+        seen_citations = {}
+
+        for idx, match in enumerate(matches):
             citation_num = int(match.group(1))
-            
+
             # Map to document (1-indexed)
             if 1 <= citation_num <= len(documents):
                 doc = documents[citation_num - 1]
-                
+
+                # Check if we've already created a citation for this doc
+                if citation_num in seen_citations:
+                    continue
+
+                seen_citations[citation_num] = True
+
                 # Find the claim being cited (text before the marker)
                 start = max(0, match.start() - 200)
-                context = response[start:match.start()]
-                
+                context_text = response[start:match.start()]
+
                 # Extract the sentence containing the citation
-                sentences = context.split('.')
+                sentences = context_text.split('.')
                 claim = sentences[-1].strip() if sentences else ""
-                
+
+                # Get source text (first 500 chars for backward compat)
+                source_text = doc.chunk.content[:500]
+
+                # Extract context with highlighting
+                source_context, highlight_start, highlight_end = extract_context(
+                    full_text=doc.chunk.content,
+                    target_text=source_text[:200],  # Use beginning of source as target
+                    context_sentences=2
+                )
+
+                # Generate preview text
+                preview = generate_preview_text(source_text, max_length=50)
+
+                # Format full source metadata
+                source_meta = format_source_metadata(doc.chunk)
+
+                # Determine validation method
+                validation_method = determine_validation_method(
+                    claim=claim,
+                    source_text=doc.chunk.content,
+                    confidence=doc.score
+                )
+
+                meta = doc.chunk.metadata
                 citation = Citation(
                     citation_id=f"cite_{citation_num}",
+                    citation_number=citation_num,
                     claim=claim,
                     source_chunk_id=doc.chunk.chunk_id,
-                    source_text=doc.chunk.content[:500],
+                    source_document_id=doc.chunk.document_id,
+                    source_text=source_text,
+                    source_context=source_context,
+                    highlight_start=highlight_start,
+                    highlight_end=highlight_end,
+                    source_metadata=source_meta,
                     confidence=doc.score,
-                    page_reference=f"{doc.chunk.metadata.document_type.value}, {doc.chunk.section}"
+                    validation_method=validation_method,
+                    preview_text=preview,
+                    # Legacy fields for backward compatibility
+                    page_reference=f"{meta.document_type.value}, {doc.chunk.section}",
+                    source_url=meta.source_url,
+                    metadata={
+                        "ticker": meta.ticker,
+                        "filing_type": meta.document_type.value,
+                        "section": doc.chunk.section,
+                        "source_url": meta.source_url,
+                    }
                 )
                 citations.append(citation)
-        
+
         return citations
     
     def _format_sources(

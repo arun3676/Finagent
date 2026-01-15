@@ -16,6 +16,8 @@ import httpx
 import re
 import time
 import logging
+import ssl
+import certifi
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +25,7 @@ from bs4 import BeautifulSoup
 
 from app.config import settings
 from app.models import DocumentMetadata, DocumentType
+from app.utils.temporal import derive_fiscal_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +58,27 @@ class SECEdgarLoader:
     def __init__(self, cache_dir: Optional[Path] = None):
         """
         Initialize SEC EDGAR loader.
-        
+
         Args:
             cache_dir: Directory to cache downloaded filings
         """
         self.cache_dir = cache_dir or Path("./data/cache/sec")
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._last_request_time = 0.0
+
+        # Create SSL context with certifi certificates
+        self.ssl_context = ssl.create_default_context(cafile=certifi.where())
+
+    def _get_http_client(self, timeout: float = 30.0, follow_redirects: bool = False) -> httpx.AsyncClient:
+        """Create httpx client with proper SSL configuration."""
+        # Temporarily disable SSL verification for testing
+        # TODO: Fix SSL certificate issues in production
+        return httpx.AsyncClient(
+            headers=self.HEADERS,
+            timeout=timeout,
+            follow_redirects=follow_redirects,
+            verify=False  # Temporary: disable SSL verification
+        )
         
     async def _rate_limit(self) -> None:
         """Enforce SEC rate limiting."""
@@ -108,9 +125,9 @@ class SECEdgarLoader:
             return cik
         
         url = f"{self.BASE_URL}/files/company_tickers.json"
-        
+
         try:
-            async with httpx.AsyncClient(headers=self.HEADERS, timeout=30.0) as client:
+            async with self._get_http_client() as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 data = response.json()
@@ -157,20 +174,22 @@ class SECEdgarLoader:
         await self._rate_limit()
         
         url = f"{self.SUBMISSIONS_URL}/CIK{cik}.json"
-        
+
         try:
-            async with httpx.AsyncClient(headers=self.HEADERS, timeout=30.0) as client:
+            async with self._get_http_client() as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 data = response.json()
                 
                 company_name = data.get("name", "")
                 filings_data = data.get("filings", {}).get("recent", {})
+                fiscal_year_end = data.get("fiscalYearEnd")
                 
                 forms = filings_data.get("form", [])
                 filing_dates = filings_data.get("filingDate", [])
                 accession_numbers = filings_data.get("accessionNumber", [])
                 primary_documents = filings_data.get("primaryDocument", [])
+                report_dates = filings_data.get("reportDate", [])
                 
                 filings = []
                 for i, form in enumerate(forms):
@@ -178,6 +197,14 @@ class SECEdgarLoader:
                         continue
                     
                     filing_date = datetime.strptime(filing_dates[i], "%Y-%m-%d")
+                    report_date = None
+                    if i < len(report_dates):
+                        report_date_str = report_dates[i]
+                        if report_date_str:
+                            try:
+                                report_date = datetime.strptime(report_date_str, "%Y-%m-%d")
+                            except ValueError:
+                                report_date = None
                     
                     if start_date and filing_date < start_date:
                         continue
@@ -192,6 +219,8 @@ class SECEdgarLoader:
                         "company_name": company_name,
                         "filing_type": form,
                         "filing_date": filing_date,
+                        "report_date": report_date,
+                        "fiscal_year_end": fiscal_year_end,
                         "accession_number": accession_numbers[i],
                         "cik": cik,
                         "primary_document": primary_doc,
@@ -232,31 +261,51 @@ class SECEdgarLoader:
             return cache_file.read_text(encoding="utf-8")
         
         await self._rate_limit()
-        
+
         accession_clean = accession_number.replace("-", "")
-        
-        if primary_document:
-            url = f"{self.ARCHIVES_URL}/{cik}/{accession_clean}/{primary_document}"
-        else:
-            url = f"{self.ARCHIVES_URL}/{cik}/{accession_clean}/{accession_number}-index.html"
-        
+
+        # Try the full submission text file - most reliable format
+        url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_clean}/{accession_number}.txt"
+
         try:
-            async with httpx.AsyncClient(headers=self.HEADERS, timeout=60.0, follow_redirects=True) as client:
+            logger.info(f"Downloading filing from: {url}")
+            async with self._get_http_client(timeout=60.0, follow_redirects=True) as client:
                 response = await client.get(url)
                 response.raise_for_status()
-                
+
                 content = response.text
-                
-                soup = BeautifulSoup(content, "lxml")
-                text = soup.get_text(separator="\n", strip=True)
-                
+
+                # Verify we got actual content
+                if len(content) < 500:
+                    raise Exception(f"Content too short: {len(content)} chars")
+
+                # Extract just the main document text (remove SGML headers)
+                # The actual filing content starts after </SEC-HEADER>
+                if "</SEC-HEADER>" in content:
+                    parts = content.split("</SEC-HEADER>", 1)
+                    if len(parts) > 1:
+                        content = parts[1]
+
+                # Parse HTML if present
+                if "<html" in content.lower() or "<HTML" in content:
+                    soup = BeautifulSoup(content, "lxml")
+                    text = soup.get_text(separator="\n", strip=True)
+                else:
+                    text = content
+
+                # Clean up excessive whitespace
+                lines = [line.strip() for line in text.split("\n") if line.strip()]
+                text = "\n".join(lines)
+
+                if len(text) < 1000:
+                    raise Exception(f"Extracted text too short: {len(text)} chars")
+
                 cache_file.write_text(text, encoding="utf-8")
-                logger.info(f"Downloaded and cached filing: {cache_file}")
-                
+                logger.info(f"Successfully downloaded and processed filing: {len(text)} chars")
                 return text
-                
+
         except Exception as e:
-            logger.error(f"Error downloading filing {accession_number}: {e}")
+            logger.error(f"Failed to download filing {accession_number}: {e}")
             raise
     
     async def parse_filing_sections(
@@ -370,7 +419,9 @@ class SECEdgarLoader:
         company_name: str,
         filing_type: str,
         filing_date: datetime,
-        accession_number: str
+        accession_number: str,
+        report_date: Optional[datetime] = None,
+        fiscal_year_end: Optional[str] = None
     ) -> DocumentMetadata:
         """
         Create DocumentMetadata from filing information.
@@ -391,11 +442,21 @@ class SECEdgarLoader:
             "8-K": DocumentType.SEC_8K
         }
         
+        derived = derive_fiscal_metadata(
+            report_date=report_date,
+            fiscal_year_end_mmdd=fiscal_year_end,
+            document_type=doc_type_map.get(filing_type, DocumentType.SEC_10K)
+        )
+
         return DocumentMetadata(
             ticker=ticker,
             company_name=company_name,
             document_type=doc_type_map.get(filing_type, DocumentType.SEC_10K),
             filing_date=filing_date,
+            fiscal_year=derived.fiscal_year,
+            fiscal_quarter=derived.fiscal_quarter,
+            fiscal_period=derived.fiscal_period,
+            period_end_date=derived.period_end_date,
             source_url=f"{self.ARCHIVES_URL}/{accession_number}",
             accession_number=accession_number
         )

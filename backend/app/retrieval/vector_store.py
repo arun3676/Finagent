@@ -65,21 +65,45 @@ class VectorStore:
     def _get_sync_client(self) -> QdrantClient:
         """Get or create sync client."""
         if self._sync_client is None:
-            self._sync_client = QdrantClient(
-                host=self.host,
-                port=self.port,
-                api_key=self.api_key
-            )
+            # Check if we have a QDRANT_URL in settings (for cloud)
+            if hasattr(settings, 'QDRANT_URL') and settings.QDRANT_URL:
+                # Use the full URL from settings (cloud instance)
+                self._sync_client = QdrantClient(
+                    url=settings.QDRANT_URL,
+                    api_key=self.api_key,
+                    timeout=settings.QDRANT_TIMEOUT
+                )
+            else:
+                # Local instance - use HTTP
+                url = f"http://{self.host}:{self.port}"
+                self._sync_client = QdrantClient(
+                    url=url,
+                    api_key=self.api_key,
+                    https=False,
+                    timeout=settings.QDRANT_TIMEOUT
+                )
         return self._sync_client
-    
+
     async def _get_async_client(self) -> AsyncQdrantClient:
         """Get or create async client."""
         if self._async_client is None:
-            self._async_client = AsyncQdrantClient(
-                host=self.host,
-                port=self.port,
-                api_key=self.api_key
-            )
+            # Check if we have a QDRANT_URL in settings (for cloud)
+            if hasattr(settings, 'QDRANT_URL') and settings.QDRANT_URL:
+                # Use the full URL from settings (cloud instance)
+                self._async_client = AsyncQdrantClient(
+                    url=settings.QDRANT_URL,
+                    api_key=self.api_key,
+                    timeout=settings.QDRANT_TIMEOUT
+                )
+            else:
+                # Local instance - use HTTP
+                url = f"http://{self.host}:{self.port}"
+                self._async_client = AsyncQdrantClient(
+                    url=url,
+                    api_key=self.api_key,
+                    https=False,
+                    timeout=settings.QDRANT_TIMEOUT
+                )
         return self._async_client
     
     def create_collection(
@@ -104,35 +128,56 @@ class VectorStore:
         
         client = self._get_sync_client()
         
-        if client.collection_exists(collection_name):
+        # Qdrant client versions differ on the helper method; use get_collection for existence
+        try:
+            client.get_collection(collection_name)
             logger.info(f"Collection {collection_name} already exists")
             return True
+        except Exception as e:
+            # If get_collection fails, it might not exist, or connection issue.
+            # We'll log it at debug level and proceed to create.
+            logger.debug(f"Collection check failed (likely doesn't exist): {e}")
+            pass
         
-        client.create_collection(
-            collection_name=collection_name,
-            vectors_config=qdrant_models.VectorParams(
-                size=vector_size,
-                distance=qdrant_models.Distance.COSINE if distance == "Cosine" else qdrant_models.Distance.EUCLID
+        try:
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=qdrant_models.VectorParams(
+                    size=vector_size,
+                    distance=qdrant_models.Distance.COSINE if distance == "Cosine" else qdrant_models.Distance.EUCLID
+                )
             )
-        )
+            logger.info(f"Created collection {collection_name} with vector size {vector_size}")
+        except Exception as e:
+            # Handle case where collection was created by another process or race condition
+            if "already exists" in str(e) or "Conflict" in str(e) or "409" in str(e):
+                logger.info(f"Collection {collection_name} already exists (caught during creation)")
+                return True
+            else:
+                logger.error(f"Failed to create collection {collection_name}: {e}")
+                raise e
         
-        client.create_payload_index(
-            collection_name=collection_name,
-            field_name="ticker",
-            field_schema=qdrant_models.PayloadSchemaType.KEYWORD
-        )
-        
-        client.create_payload_index(
-            collection_name=collection_name,
-            field_name="document_type",
-            field_schema=qdrant_models.PayloadSchemaType.KEYWORD
-        )
-        
-        client.create_payload_index(
-            collection_name=collection_name,
-            field_name="section",
-            field_schema=qdrant_models.PayloadSchemaType.KEYWORD
-        )
+        # Create common payload indexes
+        payload_indexes = {
+            "ticker": qdrant_models.PayloadSchemaType.KEYWORD,
+            "document_type": qdrant_models.PayloadSchemaType.KEYWORD,
+            "section": qdrant_models.PayloadSchemaType.KEYWORD,
+            "fiscal_period": qdrant_models.PayloadSchemaType.KEYWORD,
+            "fiscal_year": qdrant_models.PayloadSchemaType.INTEGER,
+            "fiscal_quarter": qdrant_models.PayloadSchemaType.INTEGER,
+            "filing_date": qdrant_models.PayloadSchemaType.DATETIME,
+            "period_end_date": qdrant_models.PayloadSchemaType.DATETIME,
+        }
+
+        for field_name, field_schema in payload_indexes.items():
+            try:
+                client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=field_name,
+                    field_schema=field_schema
+                )
+            except Exception as e:
+                logger.warning(f"Could not create payload index {field_name}: {e}")
         
         logger.info(f"Created collection {collection_name} with vector size {vector_size}")
         return True
@@ -201,16 +246,28 @@ class VectorStore:
         
         filter_condition = self._build_filter(filters)
         
-        results = await client.search(
-            collection_name=self.collection_name,
-            query_vector=query_embedding,
-            limit=top_k,
-            query_filter=filter_condition,
-            score_threshold=score_threshold
-        )
-        
+        # Prefer query_points (newer clients); fallback to search for older versions
+        if hasattr(client, "query_points"):
+            results = await client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                limit=top_k,
+                query_filter=filter_condition,
+                score_threshold=score_threshold
+            )
+            points = results.points
+        else:
+            # Older qdrant-client versions
+            points = await client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=top_k,
+                query_filter=filter_condition,
+                score_threshold=score_threshold
+            )
+
         retrieved_docs = []
-        for result in results:
+        for result in points:
             chunk = self._point_to_chunk(result)
             retrieved_docs.append(RetrievedDocument(
                 chunk=chunk,
@@ -293,9 +350,14 @@ class VectorStore:
         Supported filter types:
         - ticker: exact match
         - document_type: exact match
+        - section: exact match
+        - fiscal_period: exact match
+        - fiscal_year: exact match
+        - fiscal_quarter: exact match
         - filing_date_gte: date >= value
         - filing_date_lte: date <= value
-        - section: exact match
+        - period_end_date_gte: date >= value
+        - period_end_date_lte: date <= value
         
         Args:
             filters: Filter dictionary
@@ -331,6 +393,30 @@ class VectorStore:
                     match=qdrant_models.MatchValue(value=filters["section"])
                 )
             )
+
+        if "fiscal_period" in filters:
+            conditions.append(
+                qdrant_models.FieldCondition(
+                    key="fiscal_period",
+                    match=qdrant_models.MatchValue(value=filters["fiscal_period"])
+                )
+            )
+
+        if "fiscal_year" in filters:
+            conditions.append(
+                qdrant_models.FieldCondition(
+                    key="fiscal_year",
+                    match=qdrant_models.MatchValue(value=filters["fiscal_year"])
+                )
+            )
+
+        if "fiscal_quarter" in filters:
+            conditions.append(
+                qdrant_models.FieldCondition(
+                    key="fiscal_quarter",
+                    match=qdrant_models.MatchValue(value=filters["fiscal_quarter"])
+                )
+            )
         
         if "filing_date_gte" in filters:
             conditions.append(
@@ -345,6 +431,22 @@ class VectorStore:
                 qdrant_models.FieldCondition(
                     key="filing_date",
                     range=qdrant_models.Range(lte=filters["filing_date_lte"])
+                )
+            )
+
+        if "period_end_date_gte" in filters:
+            conditions.append(
+                qdrant_models.FieldCondition(
+                    key="period_end_date",
+                    range=qdrant_models.Range(gte=filters["period_end_date_gte"])
+                )
+            )
+
+        if "period_end_date_lte" in filters:
+            conditions.append(
+                qdrant_models.FieldCondition(
+                    key="period_end_date",
+                    range=qdrant_models.Range(lte=filters["period_end_date_lte"])
                 )
             )
         
@@ -375,7 +477,12 @@ class VectorStore:
                 "company_name": chunk.metadata.company_name,
                 "document_type": chunk.metadata.document_type.value,
                 "filing_date": chunk.metadata.filing_date.isoformat(),
-                "source_url": chunk.metadata.source_url
+                "period_end_date": chunk.metadata.period_end_date.isoformat() if chunk.metadata.period_end_date else None,
+                "fiscal_year": chunk.metadata.fiscal_year,
+                "fiscal_quarter": chunk.metadata.fiscal_quarter,
+                "fiscal_period": chunk.metadata.fiscal_period,
+                "source_url": chunk.metadata.source_url,
+                "accession_number": chunk.metadata.accession_number
             }
         )
     
@@ -393,11 +500,23 @@ class VectorStore:
         
         payload = point.payload
         
+        period_end_date = payload.get("period_end_date")
+        parsed_period_end = None
+        if period_end_date:
+            try:
+                parsed_period_end = datetime.fromisoformat(period_end_date)
+            except (TypeError, ValueError):
+                parsed_period_end = None
+
         metadata = DocumentMetadata(
             ticker=payload["ticker"],
             company_name=payload["company_name"],
             document_type=DocumentType(payload["document_type"]),
             filing_date=datetime.fromisoformat(payload["filing_date"]),
+            fiscal_year=payload.get("fiscal_year"),
+            fiscal_quarter=payload.get("fiscal_quarter"),
+            fiscal_period=payload.get("fiscal_period"),
+            period_end_date=parsed_period_end,
             source_url=payload["source_url"],
             accession_number=payload.get("accession_number")
         )

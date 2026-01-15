@@ -13,21 +13,22 @@ Usage:
     result = await tool.run("AAPL current")
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, ClassVar
 from datetime import datetime, timedelta
-from langchain.tools import BaseTool
+from langchain_core.tools import BaseTool
 from pydantic import Field
 
 
 class PriceLookupTool(BaseTool):
     """
     Tool for looking up stock prices.
-    
+
     Provides current and historical stock price data
     for financial analysis.
     """
-    
+
     name: str = "price_lookup"
+    INVALID_TICKERS: ClassVar[set] = {"PRICE", "TICKER", "SYMBOL"}
     description: str = """
     Look up stock prices. Supported queries:
     
@@ -87,7 +88,9 @@ class PriceLookupTool(BaseTool):
             if len(parts) < 2:
                 return "Error: Query must include ticker and operation"
             
-            ticker = parts[0].upper()
+            ticker = parts[0].upper().lstrip("$")
+            if not ticker or ticker in self.INVALID_TICKERS:
+                return "Error: Invalid ticker placeholder"
             operation = parts[1].lower()
             
             if operation == "current":
@@ -114,10 +117,65 @@ class PriceLookupTool(BaseTool):
         Returns:
             Current price information
         """
-        # TODO: Implement using yfinance or API
-        # 1. Fetch current quote
-        # 2. Format response
-        raise NotImplementedError("Current price lookup not yet implemented")
+        import yfinance as yf
+        import asyncio
+        
+        try:
+            # yfinance is synchronous, run in executor
+            loop = asyncio.get_event_loop()
+            
+            def fetch():
+                t = yf.Ticker(ticker)
+                # fast_info is faster than info
+                info = t.fast_info
+                # fallback to info if fast_info missing key data
+                if not info or not hasattr(info, 'last_price'):
+                    return t.info
+                return info
+
+            data = await loop.run_in_executor(None, fetch)
+            
+            if not data:
+                return f"Error: No data found for {ticker}"
+            
+            # Handle different data structures between info and fast_info
+            if hasattr(data, 'last_price'): # fast_info
+                price = data.last_price
+                open_p = data.open
+                previous_close = data.previous_close
+                # fast_info doesn't always have high/low/volume easily accessible in same way
+                # We can try to get today's history for that
+                try:
+                    hist = yf.Ticker(ticker).history(period="1d")
+                    if not hist.empty:
+                        high = hist['High'].iloc[0]
+                        low = hist['Low'].iloc[0]
+                        vol = hist['Volume'].iloc[0]
+                    else:
+                        high = low = vol = 0
+                except:
+                    high = low = vol = 0
+            else: # info dict
+                price = data.get('currentPrice') or data.get('regularMarketPrice')
+                open_p = data.get('open')
+                high = data.get('dayHigh')
+                low = data.get('dayLow')
+                vol = data.get('volume')
+                previous_close = data.get('previousClose')
+
+            response = (
+                f"Ticker: {ticker}\n"
+                f"Current Price: ${price:.2f}\n"
+                f"Open: ${open_p:.2f}\n"
+                f"High: ${high:.2f}\n"
+                f"Low: ${low:.2f}\n"
+                f"Volume: {vol:,}\n"
+                f"Previous Close: ${previous_close:.2f}"
+            )
+            return response
+            
+        except Exception as e:
+            return f"Error fetching price for {ticker}: {str(e)}"
     
     async def _get_historical_price(
         self,
@@ -134,11 +192,38 @@ class PriceLookupTool(BaseTool):
         Returns:
             Historical price information
         """
-        # TODO: Implement historical lookup
-        # 1. Parse date
-        # 2. Fetch historical data
-        # 3. Format response
-        raise NotImplementedError("Historical price lookup not yet implemented")
+        import yfinance as yf
+        import asyncio
+        
+        try:
+            target_date = datetime.strptime(date_str, "%Y-%m-%d")
+            start_date = target_date
+            end_date = target_date + timedelta(days=1)
+            
+            loop = asyncio.get_event_loop()
+            
+            def fetch():
+                t = yf.Ticker(ticker)
+                return t.history(start=start_date, end=end_date)
+                
+            hist = await loop.run_in_executor(None, fetch)
+            
+            if hist.empty:
+                return f"No data found for {ticker} on {date_str} (market might be closed)"
+            
+            row = hist.iloc[0]
+            return self._format_price_data({
+                "ticker": ticker,
+                "date": date_str,
+                "open": row['Open'],
+                "high": row['High'],
+                "low": row['Low'],
+                "close": row['Close'],
+                "volume": int(row['Volume'])
+            })
+            
+        except Exception as e:
+            return f"Error fetching historical price: {str(e)}"
     
     async def _get_price_range(
         self,
@@ -157,12 +242,44 @@ class PriceLookupTool(BaseTool):
         Returns:
             Price range summary
         """
-        # TODO: Implement range lookup
-        # 1. Parse dates
-        # 2. Fetch historical data
-        # 3. Calculate summary stats
-        # 4. Format response
-        raise NotImplementedError("Price range lookup not yet implemented")
+        import yfinance as yf
+        import asyncio
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            def fetch():
+                t = yf.Ticker(ticker)
+                return t.history(start=start_date, end=end_date)
+                
+            hist = await loop.run_in_executor(None, fetch)
+            
+            if hist.empty:
+                return f"No data found for {ticker} between {start_date} and {end_date}"
+            
+            # Calculate summary stats
+            avg_close = hist['Close'].mean()
+            max_high = hist['High'].max()
+            min_low = hist['Low'].min()
+            total_vol = hist['Volume'].sum()
+            
+            first_row = hist.iloc[0]
+            last_row = hist.iloc[-1]
+            change = last_row['Close'] - first_row['Open']
+            change_pct = (change / first_row['Open']) * 100
+            
+            return (
+                f"Ticker: {ticker} ({start_date} to {end_date})\n"
+                f"Days Traded: {len(hist)}\n"
+                f"Average Close: ${avg_close:.2f}\n"
+                f"Highest Price: ${max_high:.2f}\n"
+                f"Lowest Price: ${min_low:.2f}\n"
+                f"Total Volume: {total_vol:,}\n"
+                f"Price Change: ${change:.2f} ({change_pct:.2f}%)"
+            )
+            
+        except Exception as e:
+            return f"Error fetching price range: {str(e)}"
     
     async def _get_price_change(
         self,
@@ -179,12 +296,40 @@ class PriceLookupTool(BaseTool):
         Returns:
             Price change information
         """
-        # TODO: Implement price change calculation
-        # 1. Determine date range from period
-        # 2. Fetch start and end prices
-        # 3. Calculate change
-        # 4. Format response
-        raise NotImplementedError("Price change lookup not yet implemented")
+        import yfinance as yf
+        import asyncio
+        
+        try:
+            loop = asyncio.get_event_loop()
+            
+            def fetch():
+                t = yf.Ticker(ticker)
+                return t.history(period=period)
+                
+            hist = await loop.run_in_executor(None, fetch)
+            
+            if hist.empty:
+                return f"No data found for {ticker} over {period}"
+            
+            first_row = hist.iloc[0]
+            last_row = hist.iloc[-1]
+            
+            current_price = last_row['Close']
+            start_price = first_row['Open'] # Or Close? Usually Open of start period or Close of prev.
+            
+            change = current_price - start_price
+            change_pct = (change / start_price) * 100
+            
+            return (
+                f"Ticker: {ticker} (Period: {period})\n"
+                f"Current Price: ${current_price:.2f}\n"
+                f"Start Price: ${start_price:.2f}\n"
+                f"Change: ${change:.2f}\n"
+                f"Percent Change: {change_pct:.2f}%"
+            )
+            
+        except Exception as e:
+            return f"Error fetching price change: {str(e)}"
     
     def _parse_period(self, period: str) -> timedelta:
         """

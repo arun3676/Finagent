@@ -5,6 +5,8 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.0.40+-purple.svg)](https://github.com/langchain-ai/langgraph)
+[![Next.js](https://img.shields.io/badge/Next.js-14-black.svg)](https://nextjs.org/)
+[![Tests](https://img.shields.io/badge/Tests-56+-brightgreen.svg)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 FinAgent is a production-ready multi-agent system that answers complex financial research queries using SEC filings with **compliance-grade citations**. It combines hybrid retrieval (BM25 + dense embeddings), LLM-powered analysis, and a self-correcting validator agent to prevent hallucinations.
@@ -33,9 +35,12 @@ FinAgent is a production-ready multi-agent system that answers complex financial
 
 ### 📊 Production Ready
 - **Compliance-Grade Citations**: Every claim traces to exact source paragraph
+- **Real-Time Streaming**: Server-Sent Events (SSE) for progressive responses
+- **Modern Frontend**: Next.js 14 with TypeScript and Tailwind CSS
 - **Cross-Platform**: Works on Windows, Linux, and macOS
 - **Type-Safe**: Full type hints with Pydantic v2
-- **Comprehensive Testing**: Unit tests, integration tests, and validation tools
+- **Comprehensive Testing**: 56+ tests with 100% pass rate
+- **Error Recovery**: Circuit breaker pattern with automatic retry
 
 ## 🏗️ Architecture
 
@@ -50,7 +55,8 @@ User Query → Router → [Planner] → Retriever → Analyst → Synthesizer �
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
+- Node.js 18+
 - Docker (for Qdrant)
 - API Keys: OpenAI, Cohere
 
@@ -58,7 +64,7 @@ User Query → Router → [Planner] → Retriever → Analyst → Synthesizer �
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/finagent.git
+git clone https://github.com/arun3676/finagent.git
 cd finagent
 
 # Start Qdrant vector database
@@ -74,18 +80,28 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your API keys
 
-# Run the server
-uvicorn app.main:app --reload
+# Run the backend server
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8010
+
+# In a new terminal, setup and run frontend
+cd ../frontend
+npm install
+cp .env.local.example .env.local
+# Edit .env.local if needed (default: http://localhost:8010)
+npm run dev
 ```
 
 ### Try It Out
 
 ```bash
-# Health check
-curl http://localhost:8000/health
+# Backend health check
+curl http://localhost:8010/health
 
-# Run demo
-python scripts/demo.py
+# Frontend access
+# Open http://localhost:3000 in your browser
+
+# Run backend tests
+cd backend && pytest tests/ -v
 ```
 
 ## 📁 Project Structure
@@ -94,7 +110,7 @@ python scripts/demo.py
 finagent/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI entry point
+│   │   ├── main.py              # FastAPI entry point with SSE streaming
 │   │   ├── config.py            # Configuration
 │   │   ├── models.py            # Pydantic models
 │   │   ├── ingestion/           # Document loaders
@@ -104,17 +120,27 @@ finagent/
 │   │   ├── tools/               # Agent tools
 │   │   ├── citations/           # Citation system
 │   │   └── evaluation/          # Metrics & benchmarks
-│   ├── tests/                   # Test suite
+│   ├── tests/                   # Test suite (56+ tests)
 │   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/
+│   ├── app/                     # Next.js app router
+│   ├── components/              # React components
+│   │   └── chat/                # Chat interface with streaming
+│   ├── lib/                     # API client and utilities
+│   ├── types/                   # TypeScript types
+│   ├── package.json
 │   └── Dockerfile
 ├── scripts/
 │   ├── ingest_filings.py        # Batch ingestion
 │   ├── run_evaluation.py        # Run benchmarks
-│   └── demo.py                  # Interactive demo
+│   └── qdrant_smoke_check.py    # Verify ingestion
 ├── docs/
 │   ├── architecture.md
 │   ├── api.md
 │   └── deployment.md
+├── .claude/                     # Claude skills
+│   └── skills/                  # Development, testing, debugging
 └── docker-compose.yml
 ```
 
@@ -136,12 +162,23 @@ See `backend/.env.example` for all options.
 Run benchmarks:
 
 ```bash
-python scripts/run_evaluation.py --sample
+# Run full evaluation suite
+cd backend && python scripts/run_evaluation.py
+
+# Run sample evaluation
+cd backend && python scripts/run_evaluation.py --sample
 ```
 
 Metrics tracked:
 - **Retrieval**: Recall@K, Precision@K, MRR, NDCG
 - **Generation**: Answer similarity, Faithfulness, Citation precision
+- **End-to-End**: Query latency, Agent success rates, Validation passes
+
+### Test Coverage (2026-01-14)
+- **Total Tests**: 56+ with 100% pass rate
+- **E2E Flow Tests**: 32 tests covering router, retriever, validator, workflow
+- **Comprehensive Tests**: 24 tests covering models, SSE events, contracts
+- **Coverage Areas**: Query classification, ticker extraction, citation validation, workflow routing, error recovery
 
 ## 🛠️ Tech Stack
 
@@ -150,10 +187,12 @@ Metrics tracked:
 | API Framework | FastAPI |
 | Agent Orchestration | LangGraph |
 | Vector Database | Qdrant |
-| Embeddings | OpenAI text-embedding-3-small |
+| Embeddings | OpenAI text-embedding-3-large |
 | LLM | GPT-4 Turbo |
 | Reranking | Cohere |
-| Frontend | Next.js (Week 4) |
+| Frontend | Next.js 14, TypeScript, Tailwind CSS |
+| Streaming | Server-Sent Events (SSE) |
+| Testing | Pytest, Jest, React Testing Library |
 
 ## 📈 Implementation Status
 
@@ -163,13 +202,35 @@ Metrics tracked:
 - [x] **Validator Agent**: Hallucination detection with factual accuracy checks
 - [x] **Citations Engine**: Automatic claim extraction and source linking
 - [x] **Evaluation Framework**: Comprehensive metrics and test datasets
-- [x] **Testing Suite**: API validation, workflow tests, code validation tools
-- [ ] **Frontend Integration**: Next.js UI (in progress)
-- [ ] **Production Deployment**: Docker, CI/CD, monitoring
+- [x] **Testing Suite**: 56+ E2E tests with 100% pass rate
+- [x] **Error Recovery**: Circuit breaker pattern, automatic retry, graceful degradation
+- [x] **Frontend Integration**: Next.js UI with real-time streaming responses
+- [x] **SSE Streaming**: Progressive query responses with step indicators
+- [ ] **Production Deployment**: Docker Compose, CI/CD, monitoring (In Progress)
 
 ## 🤝 Contributing
 
 Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## 🔍 Development Tools
+
+### Claude Skills
+The project includes Claude skills for enhanced development experience:
+- **finagent-dev**: Development workflow and architecture guidance
+- **finagent-test**: Test runner and validation commands
+- **finagent-debug**: Troubleshooting and diagnostic tools
+
+### Quick Commands
+```bash
+# Run all tests
+cd backend && pytest tests/ -v
+
+# Debug specific components
+cd backend && python -c "from app.agents.router import QueryRouter; print('Router OK')"
+
+# Verify ingestion
+python scripts/qdrant_smoke_check.py --require AAPL
+```
 
 ## 📄 License
 

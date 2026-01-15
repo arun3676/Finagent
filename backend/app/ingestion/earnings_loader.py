@@ -219,5 +219,6 @@ class EarningsCallLoader:
             filing_date=call_date,
             fiscal_year=fiscal_year,
             fiscal_quarter=fiscal_quarter,
+            fiscal_period=f"Q{fiscal_quarter} FY{fiscal_year}" if fiscal_year and fiscal_quarter else None,
             source_url=""  # TODO: Add actual source URL
         )

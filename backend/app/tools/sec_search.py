@@ -10,7 +10,7 @@ Usage:
 """
 
 from typing import List, Optional, Dict, Any
-from langchain.tools import BaseTool
+from langchain_core.tools import BaseTool
 from pydantic import Field
 
 from app.retrieval.vector_store import VectorStore
@@ -83,11 +83,52 @@ class SECSearchTool(BaseTool):
         Returns:
             Formatted search results
         """
-        # TODO: Implement search
-        # 1. Parse query for filters (ticker, date)
-        # 2. Execute hybrid search
-        # 3. Format results for agent consumption
-        raise NotImplementedError("SEC search not yet implemented")
+        try:
+            # Initialize searcher if needed
+            if not self.hybrid_searcher:
+                from app.retrieval.hybrid_search import HybridSearcher
+                from app.retrieval.vector_store import VectorStore
+                from app.retrieval.bm25_index import BM25Index
+                from app.retrieval.embeddings import EmbeddingService
+                import os
+                
+                vector_store = VectorStore()
+                bm25_index = BM25Index()
+                
+                # Try to load existing index
+                index_path = os.path.join(os.getcwd(), "data", "indexes", "bm25.pkl")
+                if os.path.exists(index_path):
+                    bm25_index.load_index(index_path)
+                
+                embedding_service = EmbeddingService()
+                
+                self.hybrid_searcher = HybridSearcher(
+                    vector_store=vector_store,
+                    bm25_index=bm25_index,
+                    embedding_service=embedding_service
+                )
+            
+            # Parse query for filters
+            parsed = self._parse_query(query)
+            filters = {}
+            
+            if parsed["ticker"]:
+                filters["ticker"] = parsed["ticker"]
+            
+            # Construct search query
+            search_query = parsed["query"]
+            
+            # Execute search
+            results = await self.hybrid_searcher.search(
+                query=search_query,
+                top_k=self.top_k,
+                filters=filters if filters else None
+            )
+            
+            return self._format_results(results)
+            
+        except Exception as e:
+            return f"Error searching SEC filings: {str(e)}"
     
     def _parse_query(self, query: str) -> Dict[str, Any]:
         """

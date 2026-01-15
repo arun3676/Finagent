@@ -183,8 +183,13 @@ class HybridSearcher:
             scores[chunk_id] += 1.0 / (self.RRF_K + rank + 1)
         
         # Sort by fused score
-        fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return fused[:top_k]
+        fused = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
+        if not fused:
+            return []
+        max_score = fused[0][1]
+        if max_score > 0:
+            fused = [(chunk_id, score / max_score) for chunk_id, score in fused]
+        return fused
     
     def _fuse_linear(
         self,

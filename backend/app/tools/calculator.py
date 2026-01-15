@@ -17,7 +17,7 @@ Usage:
 
 from typing import Dict, Any, Optional, List
 from decimal import Decimal, InvalidOperation
-from langchain.tools import BaseTool
+from langchain_core.tools import BaseTool
 from pydantic import Field
 import re
 

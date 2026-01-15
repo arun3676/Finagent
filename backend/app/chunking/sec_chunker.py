@@ -153,30 +153,22 @@ class SECChunker:
         """Parse 10-K filing into sections."""
         sections = {}
         
+        # Patterns for 10-K sections
+        # Note: Added more robust patterns with leading whitespace support
         section_patterns = [
-            ("item_1", r"(?i)item\s*1[.\s]+business", r"(?i)item\s*1a"),
-            ("item_1a", r"(?i)item\s*1a[.\s]+risk\s*factors", r"(?i)item\s*1b"),
-            ("item_7", r"(?i)item\s*7[.\s]+management.*discussion", r"(?i)item\s*7a"),
-            ("item_8", r"(?i)item\s*8[.\s]+financial\s*statements", r"(?i)item\s*9"),
+            ("item_1", r"(?i)^\s*Item\s*1\.?\s*Business", r"(?i)^\s*Item\s*1A\.?\s*Risk"),
+            ("item_1a", r"(?i)^\s*Item\s*1A\.?\s*Risk\s*Factors", r"(?i)^\s*Item\s*1B\.?\s*Unresolved"),
+            ("item_7", r"(?i)^\s*Item\s*7\.?\s*Management", r"(?i)^\s*Item\s*7A\.?\s*Quantitative"),
+            ("item_7a", r"(?i)^\s*Item\s*7A\.?\s*Quantitative", r"(?i)^\s*Item\s*8\.?\s*Financial"),
+            ("item_8", r"(?i)^\s*Item\s*8\.?\s*Financial", r"(?i)^\s*Item\s*9\.?\s*Changes"),
+            ("item_15", r"(?i)^\s*Item\s*15\.?\s*Exhibits", r"(?i)^\s*(?:Item\s*16|Signatures)"),
         ]
         
         for section_name, start_pattern, end_pattern in section_patterns:
-            start_match = re.search(start_pattern, text)
-            if not start_match:
-                continue
-            
-            start_pos = start_match.start()
-            end_match = re.search(end_pattern, text[start_pos:])
-            
-            if end_match:
-                end_pos = start_pos + end_match.start()
-            else:
-                end_pos = len(text)
-            
-            section_content = text[start_pos:end_pos].strip()
-            if section_content:
-                sections[section_name] = section_content
-                logger.debug(f"Extracted {section_name}: {len(section_content)} chars")
+            content = self._find_best_section_match(text, start_pattern, end_pattern)
+            if content:
+                sections[section_name] = content
+                logger.debug(f"Extracted {section_name}: {len(content)} chars")
         
         return sections
     
@@ -185,27 +177,91 @@ class SECChunker:
         sections = {}
         
         section_patterns = [
-            ("part_i_item_2", r"(?i)item\s*2[.\s]+management.*discussion", r"(?i)item\s*3"),
+            ("part_i_item_1", r"(?i)^\s*Item\s*1\.?\s*Financial\s*Statements", r"(?i)^\s*Item\s*2\.?\s*Management"),
+            ("part_i_item_2", r"(?i)^\s*Item\s*2\.?\s*Management", r"(?i)^\s*Item\s*3\.?\s*Quantitative"),
+            ("part_i_item_3", r"(?i)^\s*Item\s*3\.?\s*Quantitative", r"(?i)^\s*Part\s*II"),
         ]
         
         for section_name, start_pattern, end_pattern in section_patterns:
-            start_match = re.search(start_pattern, text)
-            if not start_match:
-                continue
-            
-            start_pos = start_match.start()
-            end_match = re.search(end_pattern, text[start_pos:])
-            
-            if end_match:
-                end_pos = start_pos + end_match.start()
-            else:
-                end_pos = len(text)
-            
-            section_content = text[start_pos:end_pos].strip()
-            if section_content:
-                sections[section_name] = section_content
+            content = self._find_best_section_match(text, start_pattern, end_pattern)
+            if content:
+                sections[section_name] = content
         
         return sections
+
+    def _find_best_section_match(self, text: str, start_pattern: str, end_pattern: str) -> Optional[str]:
+        """
+        Find the best match for a section, avoiding TOCs.
+        Strategy: Look for the longest content block between start and end markers.
+        """
+        # We relax the anchors to allow matching within the line, but prefer start of line
+        # The patterns passed in are currently ^Item... which is good for clean text
+        # But text might have noise.
+        
+        # Modify patterns to be less strict about start of line if needed, 
+        # but strict about the phrasing
+        
+        # Use MULTILINE to match ^ at start of lines
+        start_matches = list(re.finditer(start_pattern, text, re.MULTILINE))
+        end_matches = list(re.finditer(end_pattern, text, re.MULTILINE))
+        
+        if not start_matches:
+            # Try without start anchor
+            relaxed_start = start_pattern.replace("^", "")
+            start_matches = list(re.finditer(relaxed_start, text))
+            
+        if not end_matches:
+            relaxed_end = end_pattern.replace("^", "")
+            end_matches = list(re.finditer(relaxed_end, text))
+            
+        if not start_matches:
+            return None
+            
+        best_content = None
+        max_length = 0
+        
+        for start_match in start_matches:
+            start_idx = start_match.start()
+            
+            # Find the first end match that comes after this start match
+            valid_end_matches = [m for m in end_matches if m.start() > start_idx]
+            
+            if valid_end_matches:
+                # Usually the correct end is the nearest one, BUT for TOCs, they are close.
+                # Real sections are far apart.
+                # However, we might have multiple "Item 1" in TOC.
+                # We want the one that has the most content before the next section marker.
+                
+                # Check distance to the *first* valid end match
+                first_end = valid_end_matches[0]
+                end_idx = first_end.start()
+                length = end_idx - start_idx
+                
+                # Filter out likely TOC entries (small length)
+                if length < 500: 
+                    continue
+                    
+                if length > max_length:
+                    max_length = length
+                    best_content = text[start_idx:end_idx]
+            else:
+                # No end match found after this start match. 
+                # This could be the last section, or parsing error.
+                # If it's the last section, take everything until end or a reasonable limit
+                remaining = len(text) - start_idx
+                if remaining > max_length and remaining > 500:
+                    max_length = remaining
+                    best_content = text[start_idx:]
+        
+        return self._clean_section_text(best_content) if best_content else None
+    
+    def _clean_section_text(self, text: str) -> str:
+        """Clean and normalize section text."""
+        # Replace multiple newlines with double newline
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        # Replace multiple spaces with single space
+        text = re.sub(r'[ \t]+', ' ', text)
+        return text.strip()
     
     def chunk_section(
         self,
@@ -434,11 +490,16 @@ class SECChunker:
             DocumentChunk instance
         """
         import hashlib
-        
-        chunk_id = hashlib.md5(
+        import uuid
+
+        # Generate a proper UUID from the hash
+        hash_hex = hashlib.md5(
             f"{document_id}_{chunk_index}_{content[:50]}".encode()
-        ).hexdigest()[:16]
-        
+        ).hexdigest()
+
+        # Convert hex to UUID format (Qdrant compatible)
+        chunk_id = str(uuid.UUID(hash_hex))
+
         return DocumentChunk(
             chunk_id=chunk_id,
             document_id=document_id,

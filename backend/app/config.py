@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # Application Settings
     APP_NAME: str = "FinAgent"
     APP_ENV: str = Field(default="development", description="development|staging|production")
+    APP_HOST: str = Field(default="0.0.0.0", description="Server host")
+    APP_PORT: int = Field(default=8010, description="Server port")
+    APP_RELOAD: bool = Field(default=True, description="Enable auto-reload in development")
     DEBUG: bool = Field(default=True, description="Enable debug mode")
     
     # API Keys - NEVER commit actual values
@@ -35,8 +38,10 @@ class Settings(BaseSettings):
     # Vector Store Configuration
     QDRANT_HOST: str = Field(default="localhost", description="Qdrant server host")
     QDRANT_PORT: int = Field(default=6333, description="Qdrant server port")
+    QDRANT_URL: Optional[str] = Field(default=None, description="Qdrant server URL (overrides host/port)")
     QDRANT_API_KEY: Optional[str] = Field(default=None, description="Qdrant API key for cloud")
     QDRANT_COLLECTION_NAME: str = Field(default="finagent_docs", description="Default collection name")
+    QDRANT_TIMEOUT: int = Field(default=30, description="Qdrant client timeout in seconds")
     
     # Embedding Configuration
     EMBEDDING_MODEL: str = Field(default="text-embedding-3-large", description="OpenAI embedding model")
@@ -51,6 +56,10 @@ class Settings(BaseSettings):
     RETRIEVAL_TOP_K: int = Field(default=10, description="Number of documents to retrieve")
     RERANK_TOP_K: int = Field(default=5, description="Number of documents after reranking")
     HYBRID_ALPHA: float = Field(default=0.7, description="Weight for dense vs sparse (0=sparse, 1=dense)")
+    RETRIEVAL_SCORE_THRESHOLD: float = Field(
+        default=0.2,
+        description="Minimum retrieval score to keep a document"
+    )
     
     # Chunking Configuration
     CHUNK_SIZE: int = Field(default=1000, description="Target chunk size in characters")

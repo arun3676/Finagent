@@ -53,6 +53,7 @@ async def ingest_company(
         Ingestion statistics
     """
     from app.models import DocumentMetadata, DocumentType
+    from app.utils.temporal import derive_fiscal_metadata
     
     stats = {
         "ticker": ticker,
@@ -103,12 +104,28 @@ async def ingest_company(
                         print(f"       - {section_name}: {section_len:,} chars")
                         stats["sections_extracted"][section_name] = section_len
                     
+                    report_date = filing.get("report_date")
+                    if isinstance(report_date, str):
+                        try:
+                            report_date = datetime.strptime(report_date, "%Y-%m-%d")
+                        except ValueError:
+                            report_date = None
+
+                    derived = derive_fiscal_metadata(
+                        report_date=report_date,
+                        fiscal_year_end_mmdd=filing.get("fiscal_year_end"),
+                        document_type=DocumentType(filing_type)
+                    )
+
                     metadata = DocumentMetadata(
                         ticker=ticker,
                         company_name=filing["company_name"],
                         document_type=DocumentType(filing_type),
                         filing_date=filing["filing_date"],
-                        fiscal_year=year,
+                        fiscal_year=derived.fiscal_year,
+                        fiscal_quarter=derived.fiscal_quarter,
+                        fiscal_period=derived.fiscal_period,
+                        period_end_date=derived.period_end_date,
                         source_url=filing["url"],
                         accession_number=filing["accession_number"]
                     )

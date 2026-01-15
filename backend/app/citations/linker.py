@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from app.models import Citation, RetrievedDocument
 from app.citations.extractor import ExtractedClaim, ClaimType
 from app.retrieval.embeddings import EmbeddingService
+from app.citations.utils import (
+    extract_context,
+    generate_preview_text,
+    format_source_metadata,
+    determine_validation_method
+)
 
 
 @dataclass
@@ -86,13 +92,54 @@ class CitationLinker:
                 )
                 
                 if doc:
+                    meta = doc.chunk.metadata
+
+                    # Get source text
+                    source_text = doc.chunk.content[:500]
+
+                    # Extract context with highlighting
+                    source_context, highlight_start, highlight_end = extract_context(
+                        full_text=doc.chunk.content,
+                        target_text=claim.text,
+                        context_sentences=2
+                    )
+
+                    # Generate preview text
+                    preview = generate_preview_text(source_text, max_length=50)
+
+                    # Format full source metadata
+                    source_meta = format_source_metadata(doc.chunk)
+
+                    # Determine validation method
+                    validation_method = determine_validation_method(
+                        claim=claim.text,
+                        source_text=doc.chunk.content,
+                        confidence=best_link.combined_score
+                    )
+
                     citation = Citation(
                         citation_id=f"cite_{i+1}",
+                        citation_number=i+1,
                         claim=claim.text,
                         source_chunk_id=best_link.chunk_id,
-                        source_text=doc.chunk.content[:500],
+                        source_document_id=doc.chunk.document_id,
+                        source_text=source_text,
+                        source_context=source_context,
+                        highlight_start=highlight_start,
+                        highlight_end=highlight_end,
+                        source_metadata=source_meta,
                         confidence=best_link.combined_score,
-                        page_reference=f"{doc.chunk.metadata.document_type.value}, {doc.chunk.section}"
+                        validation_method=validation_method,
+                        preview_text=preview,
+                        # Legacy fields for backward compatibility
+                        page_reference=f"{meta.document_type.value}, {doc.chunk.section}",
+                        source_url=meta.source_url,
+                        metadata={
+                            "ticker": meta.ticker,
+                            "filing_type": meta.document_type.value,
+                            "section": doc.chunk.section,
+                            "source_url": meta.source_url,
+                        }
                     )
                     citations.append(citation)
         

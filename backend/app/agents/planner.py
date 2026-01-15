@@ -20,12 +20,14 @@ from typing import List, Optional, Dict, Any
 from openai import AsyncOpenAI
 
 from app.config import settings
-from app.models import AgentState, SubQuery, DocumentType
+from app.models import AgentState, SubQuery, DocumentType, AgentRole, StepEvent
 from app.agents.prompts import (
     PLANNER_SYSTEM_PROMPT,
     PLANNER_USER_TEMPLATE,
     PLANNER_FEW_SHOT
 )
+from app.utils.temporal import extract_temporal_constraints, merge_temporal_filters
+from datetime import datetime
 
 
 class QueryPlanner:
@@ -53,62 +55,130 @@ class QueryPlanner:
     ) -> List[SubQuery]:
         """
         Decompose a complex query into sub-queries.
-        
+
         Args:
             query: Complex financial query
             context: Additional context (ticker, date range, etc.)
-            
+
         Returns:
             List of SubQuery objects
         """
-        # TODO: Implement query decomposition
-        # 1. Format prompt with query and context
-        # 2. Call LLM
-        # 3. Parse JSON response
-        # 4. Validate and create SubQuery objects
-        raise NotImplementedError("Query decomposition not yet implemented")
-    
-    async def plan(self, state: AgentState) -> AgentState:
+        context_str = json.dumps(context or {}, indent=2)
+        
+        try:
+            response = await self._call_llm(query, context_str)
+            sub_queries = self._parse_sub_queries(response)
+            
+            if not sub_queries:
+                raise ValueError("No sub-queries parsed")
+                
+            return sub_queries
+            
+        except Exception as e:
+            # Fallback to single query if decomposition fails
+            return [
+                SubQuery(
+                    sub_query=query,
+                    intent="Answer the query",
+                    required_docs=[DocumentType.SEC_10K],
+                    priority=1
+                )
+            ]
+
+    async def plan(self, state: AgentState) -> Dict[str, Any]:
         """
         Plan query execution and update state.
-        
-        LangGraph-compatible interface.
-        
+
+        LangGraph-compatible interface - returns dict with updated fields.
+
         Args:
             state: Current agent state
-            
+
         Returns:
-            Updated state with sub-queries
+            Dict with sub_queries field for state update
         """
+        temporal_constraints = extract_temporal_constraints(state.original_query)
+        merged_filters = merge_temporal_filters(state.filters, temporal_constraints)
+
         context = {
-            "filters": state.filters,
-            "complexity": state.complexity.value if state.complexity else None
+            "filters": merged_filters,
+            "complexity": state.complexity.value if state.complexity else None,
+            "temporal_constraints": temporal_constraints.fiscal_period
         }
-        
+
         sub_queries = await self.decompose(state.original_query, context)
-        state.sub_queries = sub_queries
-        return state
+
+        # Create step events for each sub-query
+        new_events = list(state.step_events) if state.step_events else []
+
+        # Overall planning event
+        plan_event = StepEvent(
+            event_type="step_detail",
+            agent=AgentRole.PLANNER,
+            timestamp=datetime.now(),
+            data={
+                "action": "query_decomposition",
+                "total_sub_queries": len(sub_queries),
+                "message": f"Decomposed into {len(sub_queries)} sub-queries"
+            }
+        )
+        new_events.append(plan_event)
+
+        # Event for each sub-query
+        for idx, sq in enumerate(sub_queries, 1):
+            sub_query_event = StepEvent(
+                event_type="sub_query",
+                agent=AgentRole.PLANNER,
+                timestamp=datetime.now(),
+                data={
+                    "index": idx,
+                    "total": len(sub_queries),
+                    "query": sq.sub_query,
+                    "intent": sq.intent,
+                    "priority": sq.priority,
+                    "required_docs": [dt.value for dt in sq.required_docs]
+                }
+            )
+            new_events.append(sub_query_event)
+
+        return {
+            "sub_queries": sub_queries,
+            "filters": merged_filters if merged_filters else state.filters,
+            "step_events": new_events
+        }
     
     async def _call_llm(
         self,
         query: str,
-        context: Dict[str, Any]
+        context: str
     ) -> str:
         """
         Call LLM for query decomposition.
         
         Args:
             query: Query to decompose
-            context: Additional context
+            context: Additional context string
             
         Returns:
             LLM response text
         """
-        # TODO: Implement LLM call
-        # 1. Build messages with system prompt and few-shot
-        # 2. Call OpenAI API
-        # 3. Return response content
-        raise NotImplementedError("LLM call not yet implemented")
+        messages = [
+            {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": PLANNER_FEW_SHOT},
+            {"role": "user", "content": PLANNER_USER_TEMPLATE.format(
+                query=query,
+                context=context
+            )}
+        ]
+        
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        
+        return response.choices[0].message.content
     
     def _parse_sub_queries(self, response: str) -> List[SubQuery]:
         """

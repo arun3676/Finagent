@@ -17,6 +17,7 @@ Usage:
 
 import math
 import logging
+from datetime import datetime
 from typing import List, Dict, Optional, Tuple, Any
 from collections import Counter, defaultdict
 import re
@@ -72,8 +73,8 @@ class BM25Index:
         self._documents: Dict[str, DocumentChunk] = {}  # chunk_id -> chunk
         self._doc_lengths: Dict[str, int] = {}  # chunk_id -> token count
         self._avg_doc_length: float = 0.0
-        self._doc_freqs: Dict[str, int] = {}  # term -> document frequency
-        self._inverted_index: Dict[str, Dict[str, int]] = {}  # term -> {chunk_id -> term_freq}
+        self._doc_freqs: Dict[str, int] = defaultdict(int)  # term -> document frequency
+        self._inverted_index: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))  # term -> {chunk_id -> term_freq}
         self._total_docs: int = 0
     
     def build_index(self, chunks: List[DocumentChunk]) -> None:
@@ -283,8 +284,40 @@ class BM25Index:
         
         if "section" in filters and chunk.section != filters["section"]:
             return False
-        
+
+        if "fiscal_period" in filters and chunk.metadata.fiscal_period != filters["fiscal_period"]:
+            return False
+
+        if "fiscal_year" in filters and chunk.metadata.fiscal_year != filters["fiscal_year"]:
+            return False
+
+        if "fiscal_quarter" in filters and chunk.metadata.fiscal_quarter != filters["fiscal_quarter"]:
+            return False
+
+        if "period_end_date_gte" in filters:
+            cutoff = _to_datetime(filters["period_end_date_gte"])
+            if cutoff and (chunk.metadata.period_end_date is None or chunk.metadata.period_end_date < cutoff):
+                return False
+
+        if "period_end_date_lte" in filters:
+            cutoff = _to_datetime(filters["period_end_date_lte"])
+            if cutoff and (chunk.metadata.period_end_date is None or chunk.metadata.period_end_date > cutoff):
+                return False
+
         return True
+
+
+def _to_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
     
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -308,15 +341,69 @@ class BM25Index:
         Args:
             path: File path to save to
         """
-        # TODO: Implement index serialization
-        raise NotImplementedError("Index saving not yet implemented")
+        import pickle
+        import os
+        
+        try:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            
+            data = {
+                "documents": self._documents,
+                "doc_lengths": self._doc_lengths,
+                "avg_doc_length": self._avg_doc_length,
+                "doc_freqs": self._doc_freqs,
+                "inverted_index": dict(self._inverted_index), # Convert defaultdict to dict for pickling
+                "total_docs": self._total_docs,
+                "k1": self.k1,
+                "b": self.b
+            }
+            
+            with open(path, 'wb') as f:
+                pickle.dump(data, f)
+            
+            logger.info(f"BM25 index saved to {path}")
+        except Exception as e:
+            logger.error(f"Failed to save BM25 index to {path}: {e}")
     
-    def load_index(self, path: str) -> None:
+    def load_index(self, path: str) -> bool:
         """
         Load index from disk.
         
         Args:
             path: File path to load from
+            
+        Returns:
+            True if loaded successfully
         """
-        # TODO: Implement index deserialization
-        raise NotImplementedError("Index loading not yet implemented")
+        import pickle
+        import os
+        
+        if not os.path.exists(path):
+            logger.warning(f"Index file not found at {path}")
+            return False
+            
+        try:
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
+            
+            self._documents = data["documents"]
+            self._doc_lengths = data["doc_lengths"]
+            self._avg_doc_length = data["avg_doc_length"]
+            self._doc_freqs = defaultdict(int, data["doc_freqs"])
+            
+            # Restore inverted index as defaultdict
+            self._inverted_index = defaultdict(lambda: defaultdict(int))
+            for term, chunks in data["inverted_index"].items():
+                self._inverted_index[term] = defaultdict(int, chunks)
+                
+            self._total_docs = data["total_docs"]
+            self.k1 = data.get("k1", self.k1)
+            self.b = data.get("b", self.b)
+            
+            logger.info(f"BM25 index loaded from {path} ({self._total_docs} docs)")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to load BM25 index: {e}")
+            return False

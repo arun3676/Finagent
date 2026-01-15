@@ -29,6 +29,13 @@ FROM python:3.11-slim as production
 
 WORKDIR /app
 
+# Install SSL certificates and curl
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-ca-certificates
+
 # Create non-root user for security
 RUN groupadd -r finagent && useradd -r -g finagent finagent
 
@@ -36,8 +43,16 @@ RUN groupadd -r finagent && useradd -r -g finagent finagent
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
+# Set SSL certificate environment variables
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
 # Copy application code
 COPY --chown=finagent:finagent . .
+
+# Create directories with proper permissions
+RUN mkdir -p /app/data/cache/sec && chown -R finagent:finagent /app/data
 
 # Switch to non-root user
 USER finagent

@@ -38,9 +38,9 @@ ROUTER_USER_TEMPLATE = """Classify this financial research query and respond in 
 Query: {query}
 
 Return format:
-{
+{{
   "complexity": "SIMPLE|MODERATE|COMPLEX"
-}"""
+}}"""
 
 
 # ============================================================================
@@ -135,7 +135,16 @@ Capabilities:
 - Cross-reference data across documents
 
 Always cite the specific source (document, section, page) for each data point.
-Show your calculation methodology clearly."""
+Show your calculation methodology clearly.
+
+Output MUST be a JSON object with the following structure:
+{
+  "summary": "Detailed textual analysis with citations...",
+  "key_metrics": {
+    "metric_name": "value",
+    ...
+  }
+}"""
 
 ANALYST_USER_TEMPLATE = """Extract and analyze data to answer this query:
 

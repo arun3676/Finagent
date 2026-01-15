@@ -31,6 +31,7 @@ from app.agents.retriever_agent import RetrieverAgent
 from app.agents.analyst_agent import AnalystAgent
 from app.agents.synthesizer import Synthesizer
 from app.agents.validator import Validator
+from app.agents.error_recovery import ErrorRecoveryAgent, error_recovery_agent
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,8 @@ class FinAgentWorkflow:
         retriever: RetrieverAgent = None,
         analyst: AnalystAgent = None,
         synthesizer: Synthesizer = None,
-        validator: Validator = None
+        validator: Validator = None,
+        error_recovery: ErrorRecoveryAgent = None
     ):
         """
         Initialize workflow with agents.
@@ -64,6 +66,7 @@ class FinAgentWorkflow:
             analyst: Analysis agent
             synthesizer: Response synthesizer agent
             validator: Response validator agent
+            error_recovery: Error recovery agent
         """
         self.router = router or QueryRouter()
         self.planner = planner or QueryPlanner()
@@ -71,8 +74,16 @@ class FinAgentWorkflow:
         self.analyst = analyst or AnalystAgent()
         self.synthesizer = synthesizer or Synthesizer()
         self.validator = validator or Validator()
+        self.error_recovery = error_recovery or error_recovery_agent
         
         self.graph = self._build_graph()
+    
+    async def initialize(self):
+        """Initialize all agents."""
+        logger.info("Initializing workflow agents...")
+        if hasattr(self.retriever, "initialize"):
+            await self.retriever.initialize()
+        logger.info("Workflow agents initialized")
     
     def _build_graph(self) -> StateGraph:
         """
@@ -148,7 +159,7 @@ class FinAgentWorkflow:
         filters: Optional[Dict[str, Any]] = None
     ) -> QueryResponse:
         """
-        Run the full workflow for a query.
+        Run the full workflow for a query with error recovery.
         
         Args:
             query: User's financial research query
@@ -168,8 +179,17 @@ class FinAgentWorkflow:
         )
         
         try:
-            # Run the graph
-            final_state = await self.graph.ainvoke(initial_state)
+            # Run the graph with error recovery monitoring
+            final_state = await self._run_with_recovery(initial_state)
+            
+            # Ensure final_state is AgentState
+            if isinstance(final_state, dict):
+                # LangGraph might return a dict, convert back to AgentState
+                # We need to handle potential missing fields or extra fields
+                # Filter out fields that are not in AgentState
+                valid_fields = AgentState.model_fields.keys()
+                filtered_state = {k: v for k, v in final_state.items() if k in valid_fields}
+                final_state = AgentState(**filtered_state)
             
             # Calculate processing time
             processing_time_ms = int((time.time() - start_time) * 1000)
@@ -182,6 +202,12 @@ class FinAgentWorkflow:
             
         except Exception as e:
             logger.error(f"Workflow failed: {e}")
+            
+            # Attempt error recovery
+            recovery_response = await self._attempt_error_recovery(query, str(e), start_time)
+            if recovery_response:
+                return recovery_response
+            
             processing_time_ms = int((time.time() - start_time) * 1000)
             
             return QueryResponse(
@@ -297,29 +323,28 @@ class FinAgentWorkflow:
             processing_time_ms=processing_time_ms
         )
     
-    async def _router_node(self, state: AgentState) -> AgentState:
+    async def _router_node(self, state: AgentState) -> Dict[str, Any]:
         """Router agent node."""
         return await self.router.route(state)
-    
-    async def _planner_node(self, state: AgentState) -> AgentState:
+
+    async def _planner_node(self, state: AgentState) -> Dict[str, Any]:
         """Planner agent node."""
         return await self.planner.plan(state)
-    
-    async def _retriever_node(self, state: AgentState) -> AgentState:
+
+    async def _retriever_node(self, state: AgentState) -> Dict[str, Any]:
         """Retriever agent node."""
-        return await self.retriever.retrieve(state)
+        return await self.retriever.retrieve_for_state(state)
     
-    async def _analyst_node(self, state: AgentState) -> AgentState:
+    async def _analyst_node(self, state: AgentState) -> Dict[str, Any]:
         """Analyst agent node."""
-        return await self.analyst.analyze(state)
+        return await self.analyst.analyze_for_state(state)
     
-    async def _synthesizer_node(self, state: AgentState) -> AgentState:
+    async def _synthesizer_node(self, state: AgentState) -> Dict[str, Any]:
         """Synthesizer agent node."""
-        return await self.synthesizer.synthesize(state)
+        return await self.synthesizer.synthesize_for_state(state)
     
-    async def _validator_node(self, state: AgentState) -> AgentState:
+    async def _validator_node(self, state: AgentState) -> Dict[str, Any]:
         """Validator agent node."""
-        state.iteration_count += 1
         return await self.validator.validate_for_state(state)
     
     def _build_reasoning_trace(
@@ -403,6 +428,130 @@ class FinAgentWorkflow:
         })
         
         return trace
+    
+    async def _run_with_recovery(self, initial_state: AgentState) -> AgentState:
+        """
+        Run the graph with error recovery monitoring.
+        
+        Args:
+            initial_state: Initial agent state
+            
+        Returns:
+            Final agent state
+        """
+        try:
+            # Run the graph normally
+            final_state = await self.graph.ainvoke(initial_state)
+            return final_state
+            
+        except Exception as e:
+            logger.error(f"Graph execution failed: {e}")
+            
+            # Check if error recovery can handle this
+            error_msg = str(e)
+            error_type = self.error_recovery._classify_error(error_msg)
+            
+            if error_type and not self.error_recovery._is_circuit_open(error_type):
+                logger.info(f"Attempting recovery for {error_type.value}")
+                
+                # Attempt recovery
+                recovery_successful = await self.error_recovery._attempt_recovery(error_msg, None)
+                
+                if recovery_successful:
+                    # Retry the graph execution
+                    logger.info("Recovery successful, retrying graph execution")
+                    return await self.graph.ainvoke(initial_state)
+            
+            # If recovery failed or not applicable, re-raise the exception
+            raise e
+    
+    async def _attempt_error_recovery(
+        self,
+        query: str,
+        error_msg: str,
+        start_time: float
+    ) -> Optional[QueryResponse]:
+        """
+        Attempt to recover from a workflow error and provide a fallback response.
+        
+        Args:
+            query: Original query
+            error_msg: Error message
+            start_time: Start time for processing time calculation
+            
+        Returns:
+            Fallback QueryResponse or None if recovery not possible
+        """
+        logger.info(f"Attempting error recovery for: {error_msg}")
+        
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Check if this is a known recoverable error
+        error_type = self.error_recovery._classify_error(error_msg)
+        
+        if error_type:
+            # Provide appropriate fallback response based on error type
+            if "timeout" in error_msg.lower() or "connection" in error_msg.lower():
+                return QueryResponse(
+                    query=query,
+                    answer="I'm experiencing connection issues. Please try your query again in a moment. The system is working to resolve this automatically.",
+                    citations=[],
+                    sources=[],
+                    confidence=0.0,
+                    reasoning_trace=[{
+                        "agent": "error_recovery",
+                        "action": "connection_fallback",
+                        "result": "Provided fallback response for connection issue"
+                    }],
+                    processing_time_ms=processing_time_ms
+                )
+            
+            elif "rate limit" in error_msg.lower():
+                return QueryResponse(
+                    query=query,
+                    answer="The system is currently experiencing high demand. Please wait a moment and try again. Your query will be processed shortly.",
+                    citations=[],
+                    sources=[],
+                    confidence=0.0,
+                    reasoning_trace=[{
+                        "agent": "error_recovery",
+                        "action": "rate_limit_fallback",
+                        "result": "Provided fallback response for rate limiting"
+                    }],
+                    processing_time_ms=processing_time_ms
+                )
+            
+            elif "validation" in error_msg.lower():
+                return QueryResponse(
+                    query=query,
+                    answer="I'm having trouble validating the response for your query. Please rephrase your question or try a more specific query.",
+                    citations=[],
+                    sources=[],
+                    confidence=0.0,
+                    reasoning_trace=[{
+                        "agent": "error_recovery",
+                        "action": "validation_fallback",
+                        "result": "Provided fallback response for validation failure"
+                    }],
+                    processing_time_ms=processing_time_ms
+                )
+        
+        # No recovery possible
+        return None
+    
+    def get_error_recovery_status(self) -> Dict[str, Any]:
+        """
+        Get current error recovery status.
+        
+        Returns:
+            Error recovery health status
+        """
+        return self.error_recovery.get_health_status()
+    
+    def reset_error_recovery(self):
+        """Reset error recovery state (for testing or manual intervention)."""
+        self.error_recovery.reset_error_counts()
+        logger.info("Error recovery state reset")
     
     def get_workflow_diagram(self) -> str:
         """
