@@ -39,6 +39,8 @@ FinAgent is a production-ready multi-agent system that answers complex financial
 - **Modern Frontend**: Next.js 14 with TypeScript and Tailwind CSS
 - **Cross-Platform**: Works on Windows, Linux, and macOS
 - **Type-Safe**: Full type hints with Pydantic v2
+- **Tiered LLM Routing**: FAST/STANDARD/COMPLEX model selection for cost and latency
+- **Multi-Provider LLMs**: OpenAI, Gemini, and Anthropic support behind a unified client
 - **Comprehensive Testing**: 56+ tests with 100% pass rate
 - **Error Recovery**: Circuit breaker pattern with automatic retry
 
@@ -58,7 +60,7 @@ User Query → Router → [Planner] → Retriever → Analyst → Synthesizer �
 - Python 3.11+
 - Node.js 18+
 - Docker (for Qdrant)
-- API Keys: OpenAI, Cohere
+- API Keys: OpenAI, Cohere, Google (Gemini), Anthropic
 
 ### Installation
 
@@ -101,7 +103,7 @@ curl http://localhost:8010/health
 # Open http://localhost:3000 in your browser
 
 # Run backend tests
-cd backend && pytest tests/ -v
+cd backend && python -m pytest tests/ -v
 ```
 
 ## 📁 Project Structure
@@ -152,8 +154,13 @@ Key environment variables:
 |----------|-------------|
 | `OPENAI_API_KEY` | OpenAI API key for embeddings and LLM |
 | `COHERE_API_KEY` | Cohere API key for reranking |
+| `GOOGLE_API_KEY` | Google API key for Gemini models |
+| `ANTHROPIC_API_KEY` | Anthropic API key for Claude models |
 | `QDRANT_HOST` | Qdrant server host |
 | `LLM_MODEL` | LLM model (default: gpt-4-turbo-preview) |
+| `LLM_MODEL_FAST` | FAST tier model (default: gemini-1.5-flash) |
+| `LLM_MODEL_STANDARD` | STANDARD tier model (default: gpt-4o-mini) |
+| `LLM_MODEL_COMPLEX` | COMPLEX tier model (default: claude-3-5-sonnet-20241022) |
 
 See `backend/.env.example` for all options.
 
@@ -174,7 +181,7 @@ Metrics tracked:
 - **Generation**: Answer similarity, Faithfulness, Citation precision
 - **End-to-End**: Query latency, Agent success rates, Validation passes
 
-### Test Coverage (2026-01-14)
+### Test Coverage (2026-01-15)
 - **Total Tests**: 56+ with 100% pass rate
 - **E2E Flow Tests**: 32 tests covering router, retriever, validator, workflow
 - **Comprehensive Tests**: 24 tests covering models, SSE events, contracts
@@ -188,7 +195,7 @@ Metrics tracked:
 | Agent Orchestration | LangGraph |
 | Vector Database | Qdrant |
 | Embeddings | OpenAI text-embedding-3-large |
-| LLM | GPT-4 Turbo |
+| LLM | OpenAI, Gemini, Anthropic |
 | Reranking | Cohere |
 | Frontend | Next.js 14, TypeScript, Tailwind CSS |
 | Streaming | Server-Sent Events (SSE) |
@@ -223,7 +230,7 @@ The project includes Claude skills for enhanced development experience:
 ### Quick Commands
 ```bash
 # Run all tests
-cd backend && pytest tests/ -v
+cd backend && python -m pytest tests/ -v
 
 # Debug specific components
 cd backend && python -c "from app.agents.router import QueryRouter; print('Router OK')"
@@ -236,12 +243,6 @@ python scripts/qdrant_smoke_check.py --require AAPL
 
 MIT License - see LICENSE file for details.
 
-## 👤 Author
-
-**Arun K**
-- Portfolio project demonstrating AI engineering skills
-- Built for $150K+ AI/ML engineering roles
 
 ---
 
-*Built with ❤️ and lots of ☕*
