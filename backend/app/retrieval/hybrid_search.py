@@ -17,6 +17,7 @@ Usage:
 from typing import List, Dict, Optional, Any, Tuple
 from collections import defaultdict
 import logging
+import asyncio
 
 from app.config import settings
 from app.models import DocumentChunk, RetrievedDocument
@@ -100,6 +101,87 @@ class HybridSearcher:
         
         logger.info(f"Returned {len(documents)} fused results")
         return documents
+    
+    async def retrieve_parallel(
+        self,
+        queries: List[str],
+        filters: Optional[List[Dict[str, Any]]] = None,
+        top_k: int = 5
+    ) -> Dict[str, List[RetrievedDocument]]:
+        """
+        Retrieve for multiple queries in parallel.
+        
+        This is more efficient than sequential retrieval for multi-entity
+        queries like "Compare Apple vs Microsoft margins".
+        
+        Args:
+            queries: List of query strings
+            filters: Optional list of filter dicts (one per query)
+            top_k: Number of results per query
+            
+        Returns:
+            Dict mapping query -> list of retrieved documents
+        """
+        if not queries:
+            return {}
+        
+        logger.info(f"Parallel retrieval for {len(queries)} queries")
+        
+        # 1. Batch embed all queries at once (single API call)
+        embeddings = await self.embedding_service.embed_batch(queries)
+        
+        # Normalize filters list
+        if filters is None:
+            filters = [None] * len(queries)
+        elif len(filters) < len(queries):
+            filters = filters + [None] * (len(queries) - len(filters))
+        
+        # 2. Run all retrievals concurrently using asyncio.gather
+        async def single_retrieve(query: str, embedding: List[float], filter_dict: Optional[Dict]) -> Tuple[str, List[RetrievedDocument]]:
+            """Retrieve for a single query with pre-computed embedding."""
+            try:
+                # Dense search with pre-computed embedding
+                dense_results = await self.vector_store.search(
+                    query_embedding=embedding,
+                    top_k=top_k * 2,
+                    filters=filter_dict
+                )
+                dense_tuples = [(doc.chunk.chunk_id, doc.score) for doc in dense_results]
+                
+                # Sparse search
+                sparse_results = self._sparse_search(query, top_k * 2, filter_dict)
+                
+                # Fuse results
+                fused = self._fuse_rrf(dense_tuples, sparse_results, top_k)
+                
+                # Get full documents
+                documents = await self._get_documents(fused)
+                
+                return (query, documents)
+            except Exception as e:
+                logger.error(f"Parallel retrieve failed for '{query[:30]}...': {e}")
+                return (query, [])
+        
+        # Create tasks for all queries
+        tasks = [
+            single_retrieve(query, embedding, filt)
+            for query, embedding, filt in zip(queries, embeddings, filters)
+        ]
+        
+        # Execute all in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Build result dict, handling any exceptions
+        result_dict = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Parallel retrieval task failed: {result}")
+                continue
+            query, docs = result
+            result_dict[query] = docs
+        
+        logger.info(f"Parallel retrieval complete: {sum(len(docs) for docs in result_dict.values())} total documents")
+        return result_dict
     
     async def _dense_search(
         self,

@@ -1,5 +1,7 @@
 // API Response Types
 
+export type ResponseLength = "short" | "normal" | "detailed";
+
 export interface HealthResponse {
   status: "healthy" | "degraded" | "unhealthy";
   version: string;
@@ -13,6 +15,7 @@ export interface HealthResponse {
 
 export interface QueryRequest {
   query: string;
+  response_length?: ResponseLength;
   filters?: {
     tickers?: string[];
     filing_types?: string[];
@@ -48,6 +51,7 @@ export interface QueryResponse {
   citations: QueryCitation[];
   reasoning?: string;
   analyst_notebook?: import('./analyst').AnalystNotebook;
+  query_id?: string;
   metadata: {
     query_time_ms: number;
     model_used?: string;

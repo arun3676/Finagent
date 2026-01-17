@@ -83,6 +83,8 @@ export interface Message {
   analyst_notebook?: import('./analyst').AnalystNotebook;
   validation?: import('./validation').ValidationResult;
   metadata?: MessageMetadata;
+  followUpQuestions?: import("./followup").FollowUpQuestion[];
+  queryId?: string;
   is_streaming?: boolean;
   error?: string;
 }

@@ -45,7 +45,7 @@ export function ResponseWithCitations({
       if (citation) {
         parts.push(
           <CitationMarker
-            key={`citation-${citation.citation_id}`}
+            key={`citation-${citation.citation_id}-${match.index}`}
             number={citationNumber}
             citation={citation}
             isActive={citation.citation_id === activeCitationId}
@@ -55,7 +55,7 @@ export function ResponseWithCitations({
       } else {
         // Fallback if citation not found
         parts.push(
-          <sup key={`missing-${citationNumber}`} className="text-muted-foreground">
+          <sup key={`missing-${citationNumber}-${match.index}`} className="text-muted-foreground">
             [{citationNumber}]
           </sup>
         );

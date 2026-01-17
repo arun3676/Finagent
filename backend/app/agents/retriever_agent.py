@@ -19,7 +19,7 @@ Usage:
 
 import re
 import logging
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from openai import AsyncOpenAI
 from datetime import datetime
 
@@ -346,6 +346,50 @@ class RetrieverAgent:
             logger.error(f"Auto-ingestion failed for {ticker}: {e}", exc_info=True)
             return False
     
+    async def fast_retrieve(
+        self,
+        query: str,
+        top_k: int = 5
+    ) -> List[RetrievedDocument]:
+        """
+        Fast retrieval for simple queries - bypasses planning.
+        
+        Directly retrieves documents for the raw query without
+        decomposition or complex filtering. Optimized for speed.
+        
+        Args:
+            query: Raw search query
+            top_k: Number of documents to return (default 5 for speed)
+            
+        Returns:
+            List of retrieved documents
+        """
+        logger.info(f"Fast retrieving for: '{query[:50]}...'")
+        
+        # Extract ticker for filtering
+        ticker = self.extract_ticker_from_query(query)
+        filters = {"ticker": ticker} if ticker else None
+        
+        # Check if we need to auto-ingest
+        if ticker:
+            has_data = await self.check_data_exists(ticker)
+            if not has_data:
+                logger.info(f"No data for {ticker}, auto-ingesting...")
+                await self.auto_ingest_company(ticker)
+        
+        # Direct hybrid search without reranking for speed
+        try:
+            results = await self.hybrid_searcher.search(
+                query=query,
+                top_k=top_k,
+                filters=filters
+            )
+            logger.info(f"Fast retrieve found {len(results)} documents")
+            return results
+        except Exception as e:
+            logger.error(f"Fast retrieve failed: {e}")
+            return []
+    
     async def retrieve(
         self,
         query: str,
@@ -505,11 +549,70 @@ class RetrieverAgent:
             retrieval_method="tool"
         )]
     
+    def _extract_parallel_queries(self, state: AgentState) -> List[Tuple[str, Optional[Dict]]]:
+        """
+        Extract queries that can run in parallel from planner output.
+        
+        Args:
+            state: Current agent state with sub_queries
+            
+        Returns:
+            List of (query_text, filter_dict) tuples
+        """
+        parallel_queries = []
+        
+        if not state.sub_queries:
+            return [(state.original_query, state.filters)]
+        
+        for sub_query in state.sub_queries:
+            query_text = sub_query.sub_query
+            
+            # Extract ticker from sub-query for filtering
+            ticker = self.extract_ticker_from_query(query_text)
+            filters = {"ticker": ticker} if ticker else state.filters
+            
+            parallel_queries.append((query_text, filters))
+        
+        return parallel_queries
+    
+    def _merge_parallel_results(
+        self,
+        results: Dict[str, List[RetrievedDocument]]
+    ) -> List[RetrievedDocument]:
+        """
+        Merge results from parallel queries.
+        
+        - Deduplicates by chunk_id
+        - Preserves highest score when duplicates found
+        - Maintains source query attribution for citations
+        
+        Args:
+            results: Dict mapping query -> list of documents
+            
+        Returns:
+            Merged and deduplicated list of documents
+        """
+        seen_chunks: Dict[str, RetrievedDocument] = {}
+        
+        for query, docs in results.items():
+            for doc in docs:
+                chunk_id = doc.chunk.chunk_id
+                if chunk_id not in seen_chunks:
+                    seen_chunks[chunk_id] = doc
+                elif doc.score > seen_chunks[chunk_id].score:
+                    # Keep higher-scored version
+                    seen_chunks[chunk_id] = doc
+        
+        # Sort by score descending
+        merged = sorted(seen_chunks.values(), key=lambda x: x.score, reverse=True)
+        return merged
+    
     async def retrieve_for_state(self, state: AgentState) -> Dict[str, Any]:
         """
         Retrieve documents and update agent state.
 
         LangGraph-compatible interface - returns dict with updated fields.
+        Uses parallel retrieval for multi-entity queries.
 
         Args:
             state: Current agent state
@@ -519,8 +622,68 @@ class RetrieverAgent:
         """
         new_events = list(state.step_events) if state.step_events else []
 
-        # Handle sub-queries if present
-        if state.sub_queries:
+        # Handle sub-queries if present - use parallel retrieval
+        if state.sub_queries and len(state.sub_queries) > 1:
+            # Extract parallelizable queries
+            parallel_queries = self._extract_parallel_queries(state)
+            
+            # Emit parallel retrieval start event
+            retrieval_start_event = StepEvent(
+                event_type="retrieval_progress",
+                agent=AgentRole.RETRIEVER,
+                timestamp=datetime.now(),
+                data={
+                    "status": "parallel_searching",
+                    "num_queries": len(parallel_queries),
+                    "queries": [q[0][:50] for q in parallel_queries]
+                }
+            )
+            new_events.append(retrieval_start_event)
+            
+            # Use parallel retrieval if hybrid_searcher supports it
+            if hasattr(self.hybrid_searcher, 'retrieve_parallel') and len(parallel_queries) > 1:
+                queries, filters = zip(*parallel_queries)
+                results = await self.hybrid_searcher.retrieve_parallel(
+                    list(queries),
+                    list(filters),
+                    top_k=5
+                )
+                all_docs = self._merge_parallel_results(results)
+            else:
+                # Fallback to sequential retrieval
+                all_docs = []
+                for query_text, filters in parallel_queries:
+                    docs = await self.retrieve(query_text, filters=filters)
+                    all_docs.extend(docs)
+                all_docs = self._merge_results([all_docs])
+            
+            # Emit retrieval complete event
+            if all_docs:
+                sources_found = set()
+                for doc in all_docs:
+                    source_name = f"{doc.chunk.metadata.company_name} {doc.chunk.metadata.document_type.value} {doc.chunk.metadata.filing_date.year}"
+                    sources_found.add(source_name)
+
+                retrieval_complete_event = StepEvent(
+                    event_type="retrieval_progress",
+                    agent=AgentRole.RETRIEVER,
+                    timestamp=datetime.now(),
+                    data={
+                        "status": "parallel_complete",
+                        "chunks_found": len(all_docs),
+                        "sources": list(sources_found),
+                        "avg_score": sum(d.score for d in all_docs) / len(all_docs) if all_docs else 0
+                    }
+                )
+                new_events.append(retrieval_complete_event)
+
+            return {
+                "retrieved_docs": all_docs,
+                "step_events": new_events
+            }
+        
+        # Single sub-query or no sub-queries - use standard retrieval
+        elif state.sub_queries:
             all_docs = []
             for idx, sub_query in enumerate(state.sub_queries, 1):
                 # Emit retrieval start event

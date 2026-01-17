@@ -52,10 +52,13 @@ export function TrustScoreDemo() {
       },
       claims_checked: 5,
       claims_verified: 5,
+      claims_unverified: 0,
       sources_used: 4,
+      avg_source_relevance: 0.92,
       source_diversity: "2 10-K filings (AAPL, MSFT)",
       validation_notes: ["All numbers verified against source"],
       validation_attempts: 1,
+      required_revalidation: false,
     },
     medium: {
       is_valid: true,
@@ -71,13 +74,16 @@ export function TrustScoreDemo() {
       },
       claims_checked: 4,
       claims_verified: 3,
+      claims_unverified: 1,
       sources_used: 2,
+      avg_source_relevance: 0.75,
       source_diversity: "1 10-K filing (AAPL)",
       validation_notes: [
         "One claim could not be fully verified",
         "Limited source diversity",
       ],
       validation_attempts: 2,
+      required_revalidation: false,
     },
     low: {
       is_valid: false,
@@ -93,7 +99,9 @@ export function TrustScoreDemo() {
       },
       claims_checked: 6,
       claims_verified: 2,
+      claims_unverified: 4,
       sources_used: 1,
+      avg_source_relevance: 0.45,
       source_diversity: "1 source (limited)",
       validation_notes: [
         "Multiple claims could not be verified",
@@ -101,6 +109,7 @@ export function TrustScoreDemo() {
         "Recommend manual verification",
       ],
       validation_attempts: 3,
+      required_revalidation: true,
     },
   };
 

@@ -22,6 +22,7 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.models import QueryComplexity, AgentState, AgentRole, StepEvent
 from app.agents.prompts import ROUTER_SYSTEM_PROMPT, ROUTER_USER_TEMPLATE
+from app.llm import get_client_for_agent, get_model_for_agent
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -56,11 +57,15 @@ class QueryRouter:
         
         Args:
             use_llm: Use LLM for classification (vs heuristics only)
-            model: LLM model to use
+            model: LLM model to use (defaults to fast model for router)
         """
         self.use_llm = use_llm
-        self.model = model or settings.LLM_MODEL
+        # Router uses fast model by default (classification is simple)
+        self.model = model or get_model_for_agent("router")
+        self.llm_client = get_client_for_agent("router")
+        # Keep OpenAI client as fallback
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        logger.info(f"Router initialized with model: {self.model}")
     
     async def classify(self, query: str) -> QueryComplexity:
         """
@@ -209,16 +214,26 @@ class QueryRouter:
                 {"role": "user", "content": ROUTER_USER_TEMPLATE.format(query=query)}
             ]
 
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.0,
-                max_tokens=256,
-                response_format={"type": "json_object"}
-            )
+            # Use tiered model client for faster classification
+            try:
+                content = await self.llm_client.generate(
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=256
+                )
+            except Exception as e:
+                # Fallback to OpenAI client if unified client fails
+                logger.warning(f"Tiered model failed, falling back to OpenAI: {e}")
+                response = await self.client.chat.completions.create(
+                    model=settings.LLM_MODEL,
+                    messages=messages,
+                    temperature=0.0,
+                    max_tokens=256,
+                    response_format={"type": "json_object"}
+                )
+                content = response.choices[0].message.content
 
-            # Get response content
-            content = response.choices[0].message.content
+            # Validate response content
             if not content:
                 raise ValueError("Empty response from LLM")
 

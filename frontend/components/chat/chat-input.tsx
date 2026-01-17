@@ -4,10 +4,12 @@ import { useState, useRef, KeyboardEvent } from "react";
 import { Send, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { ResponseLengthSelector } from "./response-length-selector";
 import { cn } from "@/lib/utils";
+import type { ResponseLength } from "@/types/api";
 
 interface ChatInputProps {
-  onSubmit: (message: string) => void;
+  onSubmit: (message: string, responseLength?: ResponseLength) => void;
   isLoading?: boolean;
   placeholder?: string;
   disabled?: boolean;
@@ -20,11 +22,12 @@ export function ChatInput({
   disabled = false,
 }: ChatInputProps) {
   const [input, setInput] = useState("");
+  const [responseLength, setResponseLength] = useState<ResponseLength>("normal");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = () => {
     if (input.trim() && !isLoading && !disabled) {
-      onSubmit(input.trim());
+      onSubmit(input.trim(), responseLength);
       setInput("");
       // Reset textarea height
       if (textareaRef.current) {
@@ -80,9 +83,21 @@ export function ChatInput({
           </Button>
         </div>
       </div>
-      <p className="text-xs text-muted-foreground text-center mt-2">
-        FinAgent can make mistakes. Verify important financial data.
-      </p>
+      
+      {/* Response Length Selector */}
+      <div className="flex items-center justify-between max-w-4xl mx-auto mt-3">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">Response length:</span>
+          <ResponseLengthSelector
+            value={responseLength}
+            onChange={setResponseLength}
+            disabled={isLoading || disabled}
+          />
+        </div>
+        <p className="text-xs text-muted-foreground">
+          FinAgent can make mistakes. Verify important financial data.
+        </p>
+      </div>
     </div>
   );
 }

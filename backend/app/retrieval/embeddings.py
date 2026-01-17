@@ -146,6 +146,21 @@ class EmbeddingService:
         # For OpenAI models, query and document embeddings are the same
         return await self.embed_text(query)
     
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for multiple texts in a single batch call.
+        
+        This is more efficient than calling embed_text multiple times
+        as it uses a single API call for all texts.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        return await self.embed_texts(texts)
+    
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     async def _embed_batch(self, texts: List[str]) -> List[List[float]]:
         """

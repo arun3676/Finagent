@@ -12,6 +12,7 @@ import { ResponseWithCitations } from "./response-with-citations";
 import { CitationPanel } from "./citation-panel";
 import { AnalystNotebook } from "./analyst-notebook";
 import { TrustScoreFooter } from "./trust-score-footer";
+import { FollowUpPanel } from "./FollowUpPanel";
 import { useCitationExplorer } from "@/hooks/useCitationExplorer";
 
 interface MessageItemProps {
@@ -130,6 +131,20 @@ export function MessageItem({ message, showReasoning = true }: MessageItemProps)
             })}
           </div>
         )}
+
+        {/* Follow-up Questions */}
+        {isAssistant &&
+          message.followUpQuestions &&
+          message.followUpQuestions.length > 0 &&
+          message.queryId && (
+            <FollowUpPanel
+              questions={message.followUpQuestions}
+              parentQueryId={message.queryId}
+              onFollowUpResponse={(response) => {
+                console.log("Follow-up answered:", response);
+              }}
+            />
+          )}
 
         {/* Agent Steps (Reasoning) */}
         {isAssistant && showReasoning && message.agent_steps && message.agent_steps.length > 0 && (

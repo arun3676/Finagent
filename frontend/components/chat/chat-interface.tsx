@@ -11,8 +11,10 @@ import { AgentStepper } from "./agent-stepper";
 import { Message, ComplexityInfo, Citation } from "@/types/chat";
 import { ValidationResult } from "@/types/validation";
 import { AnalystNotebook } from "@/types/analyst";
-import { QueryCitation } from "@/types/api";
+import { QueryCitation, ResponseLength } from "@/types/api";
 import { sendStreamingQuery } from "@/lib/api/query";
+import { getFollowUpQuestions } from "@/lib/api/followup";
+import type { FollowUpQuestion } from "@/types/followup";
 
 /**
  * Convert QueryCitation (from API) to Citation (for display)
@@ -90,8 +92,49 @@ export function ChatInterface() {
   );
   const messages = activeConversation?.messages || [];
 
+  // Function to fetch follow-up questions with retry logic
+  const fetchFollowUpQuestions = useCallback(async (
+    convId: string,
+    messageId: string,
+    queryId: string,
+    retryCount = 0
+  ) => {
+    const maxRetries = 3;
+    const retryDelay = 2000; // 2 seconds
+
+    try {
+      const result = await getFollowUpQuestions(queryId);
+      
+      if (result.follow_up_questions && result.follow_up_questions.length > 0) {
+        // Map backend response to frontend types
+        const followUpQuestions: FollowUpQuestion[] = result.follow_up_questions.map((q: any) => ({
+          id: q.id,
+          text: q.text,
+          category: q.category,
+          relevantChunkIds: q.relevant_chunk_ids || [],
+          requiresNewRetrieval: q.requires_new_retrieval || false,
+        }));
+
+        updateMessage(convId, messageId, {
+          followUpQuestions,
+        });
+      } else if (
+        (result.status === "pending" || result.status === "not_found") &&
+        retryCount < maxRetries
+      ) {
+        // Follow-ups are still being generated, retry after delay
+        setTimeout(() => {
+          fetchFollowUpQuestions(convId, messageId, queryId, retryCount + 1);
+        }, retryDelay);
+      }
+    } catch (error) {
+      console.error("Failed to fetch follow-up questions:", error);
+      // Don't retry on error, just log it
+    }
+  }, [updateMessage]);
+
   const handleSubmit = useCallback(
-    async (content: string) => {
+    async (content: string, responseLength?: ResponseLength) => {
       // Ensure we have an active conversation
       let convId = activeConversationId;
       if (!convId) {
@@ -133,6 +176,7 @@ export function ChatInterface() {
         await sendStreamingQuery(
           {
             query: content,
+            response_length: responseLength || "normal",
             options: {
               include_reasoning: true,
               include_citations: true,
@@ -152,6 +196,7 @@ export function ChatInterface() {
               citations: displayCitations,
               analyst_notebook: response.analyst_notebook || analystNotebookRef.current || undefined,
               validation: validationRef.current || undefined,
+              queryId: response.query_id,
               metadata: {
                 query_time_ms: response.metadata.query_time_ms,
                 model_used: response.metadata.model_used,
@@ -159,6 +204,11 @@ export function ChatInterface() {
                 confidence: response.metadata.confidence,
               },
             });
+
+            // Fetch follow-up questions after response is complete
+            if (response.query_id) {
+              fetchFollowUpQuestions(convId, assistantMessageId, response.query_id);
+            }
           },
           (error) => {
             updateMessage(convId, assistantMessageId, {
@@ -201,6 +251,7 @@ export function ChatInterface() {
       setStreaming,
       resetStepper,
       handleSSEEvent,
+      fetchFollowUpQuestions,
     ]
   );
 

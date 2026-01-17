@@ -27,7 +27,12 @@ from langchain_core.runnables import RunnableLambda
 
 from app.config import settings
 from app.agents.workflow import FinAgentWorkflow
-from app.models import AgentState
+from app.models import AgentState, ResponseLength, FollowUpRequest, FollowUpResponse as FollowUpResponseModel
+from app.cache import SemanticQueryCache
+from app.retrieval.embeddings import EmbeddingService
+from app.followup.executor import FollowUpExecutor, get_follow_up_executor
+from app.followup.generator import FollowUpQuestion
+from app.followup.cache import get_chunk_cache
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,7 @@ class QueryOptions(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     conversation_id: Optional[str] = None
+    response_length: Optional[ResponseLength] = ResponseLength.NORMAL
     options: Optional[QueryOptions] = None
 
 # Ingest endpoint models
@@ -66,6 +72,15 @@ ingest_jobs = {}
 # Maps citation_id -> full citation data with extended context
 citation_cache = {}
 
+# Initialize semantic query cache as singleton
+embedding_service_for_cache = EmbeddingService()
+query_cache = SemanticQueryCache(
+    embedding_service=embedding_service_for_cache,
+    max_size=1000,
+    default_ttl_hours=24.0,
+    similarity_threshold=0.92
+)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -75,6 +90,7 @@ async def lifespan(app: FastAPI):
     # Initialize workflow and agents
     await workflow.initialize()
     print("FinAgent workflow initialized successfully")
+    print(f"Query cache initialized: max_size={query_cache.max_size}, threshold={query_cache.similarity_threshold}")
     yield
     print("FinAgent shutting down...")
 
@@ -97,14 +113,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Workflow
-workflow = FinAgentWorkflow()
+# Initialize Workflow with query cache
+workflow = FinAgentWorkflow(query_cache=query_cache)
 
 def input_adapter(input_data: Dict[str, Any]) -> AgentState:
     """Adapt frontend input to AgentState."""
     # Handle both dict (from LangServe) and Pydantic model
     query = input_data.get("input", "")
-    return AgentState(original_query=query)
+    response_length = input_data.get("response_length", "normal")
+    from app.models import ResponseLength
+    return AgentState(
+        original_query=query,
+        response_length=ResponseLength(response_length)
+    )
 
 # Create the runnable chain
 # We wrap the graph execution to handle input adaptation
@@ -172,6 +193,48 @@ async def health_check() -> Dict[str, Any]:
     }
 
 
+@app.get("/cache/stats", tags=["Cache"])
+async def get_cache_stats() -> Dict[str, Any]:
+    """
+    Get semantic query cache statistics.
+    
+    Returns cache performance metrics including hit rate, size, and configuration.
+    """
+    return query_cache.get_stats()
+
+
+@app.post("/cache/clear", tags=["Cache"])
+async def clear_cache() -> Dict[str, Any]:
+    """
+    Clear all cached query-response pairs.
+    
+    Use with caution - this will remove all cached responses.
+    """
+    count = await query_cache.clear()
+    return {
+        "status": "cleared",
+        "entries_removed": count
+    }
+
+
+@app.post("/cache/invalidate/{ticker}", tags=["Cache"])
+async def invalidate_cache_for_ticker(ticker: str) -> Dict[str, Any]:
+    """
+    Invalidate cache entries for a specific ticker.
+    
+    Useful after ingesting new data for a company.
+    
+    Args:
+        ticker: Stock ticker symbol (e.g., AAPL, MSFT)
+    """
+    count = await query_cache.invalidate_for_ticker(ticker)
+    return {
+        "status": "invalidated",
+        "ticker": ticker.upper(),
+        "entries_removed": count
+    }
+
+
 @app.post("/query", tags=["Query"])
 async def query(request: QueryRequest) -> Dict[str, Any]:
     """
@@ -180,7 +243,10 @@ async def query(request: QueryRequest) -> Dict[str, Any]:
     start_time = time.time()
 
     try:
-        state = AgentState(original_query=request.query)
+        state = AgentState(
+            original_query=request.query,
+            response_length=request.response_length or ResponseLength.NORMAL
+        )
         result = await workflow.graph.ainvoke(state)
 
         processing_time = int((time.time() - start_time) * 1000)
@@ -223,6 +289,12 @@ async def query(request: QueryRequest) -> Dict[str, Any]:
             elif isinstance(analyst_notebook, dict):
                 notebook_data = analyst_notebook
 
+        # Generate query_id for follow-up questions
+        query_id = result.get("query_id") if isinstance(result, dict) else getattr(result, "query_id", None)
+        if not query_id:
+            import uuid
+            query_id = str(uuid.uuid4())
+
         return {
             "answer": answer,
             "citations": citations,
@@ -232,6 +304,7 @@ async def query(request: QueryRequest) -> Dict[str, Any]:
             "sources": retrieved_docs,
             "validation": validation_data,
             "analyst_notebook": notebook_data,
+            "query_id": query_id,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -253,7 +326,10 @@ async def query_stream(request: QueryRequest):
             yield f"data: {json.dumps({'type': 'step', 'step': 'router', 'status': 'started'})}\n\n"
 
             # Run workflow synchronously (more reliable than streaming events)
-            state = AgentState(original_query=request.query)
+            state = AgentState(
+                original_query=request.query,
+                response_length=request.response_length or ResponseLength.NORMAL
+            )
             logger.info("[query/stream] Running workflow...")
 
             result = await workflow.graph.ainvoke(state)
@@ -351,6 +427,23 @@ async def query_stream(request: QueryRequest):
 
             processing_time = int((time.time() - start_time) * 1000)
 
+            # Generate query_id for follow-up questions
+            query_id = result.get("query_id") if isinstance(result, dict) else getattr(result, "query_id", None)
+            if not query_id:
+                import uuid
+                query_id = str(uuid.uuid4())
+
+            # Cache chunks for follow-up questions (async, non-blocking)
+            import asyncio
+            asyncio.create_task(
+                workflow._cache_chunks_for_followup(
+                    query_id=query_id,
+                    query_text=request.query,
+                    final_state=result if isinstance(result, dict) else result,
+                    response_summary=answer[:500] if answer else ""
+                )
+            )
+
             # Serialize citations and cache them
             serialized_citations = []
             for c in citations:
@@ -372,7 +465,7 @@ async def query_stream(request: QueryRequest):
 
             # Send final metadata
             yield f"data: {json.dumps({'type': 'citations', 'citations': serialized_citations})}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'metadata': {'query_time_ms': processing_time, 'model_used': 'gpt-4', 'sources_consulted': len(docs)}})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'metadata': {'query_time_ms': processing_time, 'model_used': 'gpt-4', 'sources_consulted': len(docs), 'query_id': query_id}})}\n\n"
 
         except Exception as e:
             logger.error(f"[query/stream] Error: {e}", exc_info=True)
@@ -810,6 +903,123 @@ async def get_citation_source(citation_id: str):
             "text": citation_data.get("source_text", "")
         }
     }
+
+
+# ============================================================================
+# Follow-Up Question Endpoints
+# ============================================================================
+
+@app.post("/api/followup", tags=["Follow-Up"], response_model=FollowUpResponseModel)
+async def execute_followup(request: FollowUpRequest):
+    """
+    Execute a follow-up question using cached context.
+
+    Target response time: <1.5 seconds for cached path.
+
+    Args:
+        request: FollowUpRequest with question_id, question_text, and parent_query_id
+
+    Returns:
+        FollowUpResponse with answer, citations, and execution time
+    """
+    logger.info(f"[followup] Executing follow-up: {request.question_text[:50]}...")
+
+    try:
+        executor = get_follow_up_executor()
+
+        # Create FollowUpQuestion object
+        follow_up_question = FollowUpQuestion(
+            id=request.question_id,
+            text=request.question_text,
+            category="related",  # Default category
+            relevant_chunk_ids=[],  # Executor will use all cached
+            requires_new_retrieval=False
+        )
+
+        # Execute the follow-up
+        response = await executor.execute(
+            follow_up_question=follow_up_question,
+            parent_query_id=request.parent_query_id
+        )
+
+        logger.info(f"[followup] Executed in {response.execution_time_ms}ms (cached={response.used_cache})")
+
+        return FollowUpResponseModel(
+            question=response.question,
+            answer=response.answer,
+            citations=response.citations,
+            execution_time_ms=response.execution_time_ms,
+            used_cache=response.used_cache
+        )
+
+    except Exception as e:
+        logger.error(f"[followup] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/followup/{query_id}", tags=["Follow-Up"])
+async def get_followup_questions(query_id: str):
+    """
+    Get generated follow-up questions for a query.
+
+    Args:
+        query_id: The query identifier from the original query response
+
+    Returns:
+        List of follow-up questions with their categories
+    """
+    try:
+        follow_ups = await workflow.get_follow_up_questions(query_id)
+
+        if not follow_ups:
+            # Check if query exists but no follow-ups generated yet
+            chunk_cache = get_chunk_cache()
+            cache_entry = await chunk_cache.get(query_id)
+
+            if cache_entry is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Query {query_id} not found. It may have expired from cache."
+                )
+
+            # Entry exists but no follow-ups yet
+            return {
+                "query_id": query_id,
+                "follow_up_questions": [],
+                "status": "pending",
+                "message": "Follow-up questions are being generated"
+            }
+
+        # Serialize follow-up questions
+        serialized = []
+        for fu in follow_ups:
+            if hasattr(fu, 'model_dump'):
+                serialized.append(fu.model_dump())
+            elif isinstance(fu, dict):
+                serialized.append(fu)
+
+        return {
+            "query_id": query_id,
+            "follow_up_questions": serialized,
+            "status": "ready",
+            "count": len(serialized)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[followup] Error getting follow-ups: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/followup/cache/stats", tags=["Follow-Up"])
+async def get_followup_cache_stats():
+    """
+    Get chunk cache statistics for follow-up questions.
+
+    Returns cache performance metrics including hit rate, size, and TTL.
+    """
+    return workflow.get_chunk_cache_stats()
 
 
 if __name__ == "__main__":

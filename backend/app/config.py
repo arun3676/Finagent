@@ -52,6 +52,22 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = Field(default=0.1, description="LLM temperature for responses")
     LLM_MAX_TOKENS: int = Field(default=4096, description="Max tokens for LLM response")
     
+    # Model Tiers for Performance Optimization
+    LLM_MODEL_FAST: str = Field(default="gemini-2.0-flash-lite", description="Fast model for simple tasks")
+    LLM_MODEL_STANDARD: str = Field(default="gpt-4o-mini", description="Standard model for moderate tasks")
+    LLM_MODEL_COMPLEX: str = Field(default="gpt-4o", description="Complex model for reasoning tasks")
+    
+    # Per-Agent Model Assignments
+    ROUTER_MODEL: str = Field(default="gemini-2.0-flash-lite", description="Router uses fast model")
+    PLANNER_MODEL: str = Field(default="gpt-4o-mini", description="Planner uses standard model")
+    FAST_SYNTHESIZER_MODEL: str = Field(default="gemini-2.0-flash-lite", description="Fast synth uses fast model")
+    SYNTHESIZER_MODEL: str = Field(default="gpt-4o-mini", description="Synthesizer uses standard model")
+    VALIDATOR_MODEL: str = Field(default="gpt-4o", description="Validator uses complex model")
+    ANALYST_MODEL: str = Field(default="gpt-4o-mini", description="Analyst uses standard model")
+    
+    # Google/Gemini API Configuration
+    GOOGLE_API_KEY: str = Field(default="", description="Google API key for Gemini models")
+    
     # Retrieval Configuration
     RETRIEVAL_TOP_K: int = Field(default=10, description="Number of documents to retrieve")
     RERANK_TOP_K: int = Field(default=5, description="Number of documents after reranking")

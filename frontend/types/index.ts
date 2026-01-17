@@ -2,6 +2,7 @@ export * from "./analyst";
 export * from "./chat";
 export * from "./citation";
 export * from "./company";
+export * from "./followup";
 export * from "./trace";
 export * from "./validation";
 

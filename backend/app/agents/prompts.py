@@ -157,6 +157,58 @@ Analysis (with citations):"""
 
 
 # ============================================================================
+# Fast Synthesizer Prompt (for SIMPLE queries - speed optimized)
+# ============================================================================
+
+FAST_SYNTHESIS_PROMPT = """Answer the question using ONLY the provided context. Be concise and direct.
+
+Rules:
+1. Use citation markers [1], [2], etc. to reference sources
+2. If the answer is not in the context, say "Information not found in available documents"
+3. For numerical data, include the exact figures from the source
+4. Keep response under 150 words
+
+Question: {query}
+
+Context:
+{context}
+
+Answer (with citations):"""
+
+# Length-specific fast synthesis prompts
+FAST_SYNTHESIS_SHORT_PROMPT = """Answer the question using ONLY the provided context. Be extremely concise.
+
+Rules:
+1. Answer in 1-2 sentences maximum (30-60 words)
+2. Use citation markers [1], [2], etc. to reference sources
+3. Include only the most essential fact or number
+4. No elaboration or context
+
+Question: {query}
+
+Context:
+{context}
+
+Answer (with citations):"""
+
+FAST_SYNTHESIS_DETAILED_PROMPT = """Answer the question using ONLY the provided context. Provide comprehensive details.
+
+Rules:
+1. Use citation markers [1], [2], etc. to reference sources
+2. Include multiple supporting data points when available
+3. Provide context and explain significance
+4. Target 200-400 words for thorough coverage
+5. Structure with clear logical flow
+
+Question: {query}
+
+Context:
+{context}
+
+Answer (with citations):"""
+
+
+# ============================================================================
 # Synthesizer Agent Prompts
 # ============================================================================
 
@@ -171,6 +223,50 @@ Guidelines:
 4. Include relevant context and caveats
 5. Be concise but comprehensive
 6. Use professional financial language
+
+Format citations as: [N] where N corresponds to the source list."""
+
+# Length-specific system prompts
+SYNTHESIZER_SHORT_PROMPT = """You are a financial research assistant providing concise answers.
+
+Your task is to provide brief, direct responses to financial queries.
+
+Guidelines:
+1. Answer in 2-3 sentences maximum (50-100 words)
+2. Focus on the most essential information only
+3. Use [1], [2], etc. for inline citations
+4. Be direct and factual - no elaboration
+5. Include key numbers/dates when relevant
+
+Format citations as: [N] where N corresponds to the source list."""
+
+SYNTHESIZER_NORMAL_PROMPT = """You are a financial research report writer.
+
+Your task is to synthesize analyzed data into a clear, professional response.
+
+Guidelines:
+1. Provide a balanced response in 3-5 sentences (150-250 words)
+2. Start with a direct answer to the question
+3. Support with specific data points and citations
+4. Use [1], [2], etc. for inline citations
+5. Include relevant context but stay focused
+6. Use professional financial language
+
+Format citations as: [N] where N corresponds to the source list."""
+
+SYNTHESIZER_DETAILED_PROMPT = """You are a senior financial research analyst writing comprehensive reports.
+
+Your task is to provide thorough analysis with detailed explanations and context.
+
+Guidelines:
+1. Provide comprehensive analysis (400-800 words)
+2. Start with executive summary, then detailed analysis
+3. Include multiple supporting data points with citations
+4. Use [1], [2], etc. for inline citations
+5. Provide context, trends, and implications
+6. Address potential caveats and limitations
+7. Use professional financial language with technical depth
+8. Structure with clear logical flow
 
 Format citations as: [N] where N corresponds to the source list."""
 
@@ -216,6 +312,72 @@ Validation:"""
 
 
 # ============================================================================
+# Follow-Up Question Prompts
+# ============================================================================
+
+FOLLOW_UP_SYNTHESIZER_PROMPT = """You are answering a follow-up question about financial data.
+
+Context from SEC filings:
+{context}
+
+Follow-up question: {question}
+
+Instructions:
+1. Answer in 3-5 sentences maximum - be concise and direct
+2. Use specific numbers and facts from the context
+3. Include source references [1], [2] for citations
+4. Do not repeat information - assume user saw the original response
+5. If context doesn't fully answer, say so briefly and answer what you can
+
+Response format:
+[Your 3-5 sentence answer with inline citations]"""
+
+
+FOLLOW_UP_GENERATION_PROMPT = """You are a financial research assistant generating follow-up questions.
+
+Given:
+- Original query: {query}
+- Response summary: {response_summary}
+- Companies mentioned: {companies}
+- Metrics discussed: {metrics}
+- Available context topics: {chunk_summaries}
+
+Generate exactly 3 follow-up questions that:
+1. Are self-contained (work without seeing original query)
+2. Can mostly be answered from the same SEC filings already retrieved
+3. Would genuinely help a financial analyst explore deeper
+4. Are specific, not generic
+
+Categories (generate one of each if possible):
+- TEMPORAL: How has X changed over time? (trend analysis)
+- DEEPER: What factors/reasons/details about X? (drill down)
+- COMPARATIVE or RELATED: Compare to peer OR explore adjacent metric
+
+Format response as JSON:
+{{
+  "questions": [
+    {{
+      "text": "How has Apple's gross margin trended from 2021 to 2023?",
+      "category": "temporal",
+      "can_answer_from_cache": true
+    }},
+    {{
+      "text": "What factors does Apple cite for the margin improvement?",
+      "category": "deeper",
+      "can_answer_from_cache": true
+    }},
+    {{
+      "text": "How does Apple's gross margin compare to Microsoft's?",
+      "category": "comparative",
+      "can_answer_from_cache": false
+    }}
+  ]
+}}
+
+Keep questions concise (<15 words each)."""
+
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -231,6 +393,60 @@ def format_prompt(template: str, **kwargs) -> str:
         Formatted prompt string
     """
     return template.format(**kwargs)
+
+
+def get_synthesizer_prompt_for_length(response_length: str) -> str:
+    """
+    Get the appropriate synthesizer system prompt based on response length.
+    
+    Args:
+        response_length: "short", "normal", or "detailed"
+        
+    Returns:
+        System prompt string for the specified length
+    """
+    length_prompts = {
+        "short": SYNTHESIZER_SHORT_PROMPT,
+        "normal": SYNTHESIZER_NORMAL_PROMPT,
+        "detailed": SYNTHESIZER_DETAILED_PROMPT
+    }
+    return length_prompts.get(response_length, SYNTHESIZER_NORMAL_PROMPT)
+
+
+def get_fast_synthesis_prompt_for_length(response_length: str) -> str:
+    """
+    Get the appropriate fast synthesis prompt based on response length.
+    
+    Args:
+        response_length: "short", "normal", or "detailed"
+        
+    Returns:
+        Fast synthesis prompt template for the specified length
+    """
+    length_prompts = {
+        "short": FAST_SYNTHESIS_SHORT_PROMPT,
+        "normal": FAST_SYNTHESIS_PROMPT,
+        "detailed": FAST_SYNTHESIS_DETAILED_PROMPT
+    }
+    return length_prompts.get(response_length, FAST_SYNTHESIS_PROMPT)
+
+
+def get_max_tokens_for_length(response_length: str) -> int:
+    """
+    Get the appropriate max_tokens setting based on response length.
+    
+    Args:
+        response_length: "short", "normal", or "detailed"
+        
+    Returns:
+        Maximum tokens for the specified length
+    """
+    token_limits = {
+        "short": 150,      # ~50-100 words
+        "normal": 400,     # ~150-250 words  
+        "detailed": 1000   # ~400-800 words
+    }
+    return token_limits.get(response_length, 400)
 
 
 def get_agent_prompts(agent_type: str) -> dict:

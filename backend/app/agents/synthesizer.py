@@ -15,14 +15,22 @@ Usage:
     response = await synthesizer.synthesize(query, analysis, sources)
 """
 
+import logging
 from typing import List, Optional, Dict, Any
 from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from app.config import settings
 from app.models import AgentState, RetrievedDocument, Citation, CitedResponse
-from app.agents.prompts import SYNTHESIZER_SYSTEM_PROMPT, SYNTHESIZER_USER_TEMPLATE
+from app.agents.prompts import (
+    SYNTHESIZER_SYSTEM_PROMPT, 
+    SYNTHESIZER_USER_TEMPLATE,
+    get_synthesizer_prompt_for_length,
+    get_max_tokens_for_length
+)
 from app.citations.utils import (
     extract_context,
     generate_preview_text,
@@ -61,7 +69,8 @@ class Synthesizer:
         self,
         query: str,
         analysis: Dict[str, Any],
-        documents: List[RetrievedDocument]
+        documents: List[RetrievedDocument],
+        response_length: str = "normal"
     ) -> CitedResponse:
         """
         Synthesize a cited response.
@@ -90,7 +99,8 @@ class Synthesizer:
             response_text = await self._generate_response(
                 query, 
                 analysis, 
-                formatted_sources
+                formatted_sources,
+                response_length
             )
             
             # 3. Extract citations
@@ -128,7 +138,8 @@ class Synthesizer:
         response = await self.synthesize(
             state.original_query,
             state.extracted_data,
-            state.retrieved_docs
+            state.retrieved_docs,
+            state.response_length.value if hasattr(state.response_length, 'value') else str(state.response_length)
         )
 
         return {
@@ -140,27 +151,36 @@ class Synthesizer:
         self,
         query: str,
         analysis: Dict[str, Any],
-        sources: str
+        sources: str,
+        response_length: str = "normal"
     ) -> str:
         """
-        Generate response text using LLM.
+        Generate response text using LLM with length-specific prompts.
         
         Args:
             query: User query
             analysis: Analyzed data
             sources: Formatted source information string
+            response_length: Desired response length ("short", "normal", "detailed")
             
         Returns:
             Generated response with citation markers
         """
-        # Build prompt
+        # Get length-specific system prompt
+        system_prompt = get_synthesizer_prompt_for_length(response_length)
+        max_tokens = get_max_tokens_for_length(response_length)
+        
+        # Build prompt with length-specific system message
         prompt = ChatPromptTemplate.from_messages([
-            ("system", SYNTHESIZER_SYSTEM_PROMPT),
+            ("system", system_prompt),
             ("user", SYNTHESIZER_USER_TEMPLATE)
         ])
         
+        # Update LLM with appropriate max_tokens
+        llm_with_tokens = self.llm.bind(max_tokens=max_tokens)
+        
         # Create chain
-        chain = prompt | self.llm | StrOutputParser()
+        chain = prompt | llm_with_tokens | StrOutputParser()
         
         # Generate response
         # Note: We use ainvoke here. The streaming events will be captured 

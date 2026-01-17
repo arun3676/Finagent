@@ -35,6 +35,13 @@ class QueryComplexity(str, Enum):
     COMPLEX = "complex"        # Multi-document analysis
 
 
+class ResponseLength(str, Enum):
+    """Response length modes for user selection."""
+    SHORT = "short"            # 2-3 lines, ~50-100 words
+    NORMAL = "normal"          # 5-6 lines, ~150-250 words (default)
+    DETAILED = "detailed"      # Comprehensive, ~400-800 words
+
+
 class AgentRole(str, Enum):
     """Roles in the multi-agent system."""
     ROUTER = "router"
@@ -109,6 +116,10 @@ class RetrievedDocument(BaseModel):
 class QueryRequest(BaseModel):
     """Incoming query request from user."""
     query: str = Field(..., description="Natural language query", min_length=10)
+    response_length: Optional[ResponseLength] = Field(
+        default=ResponseLength.NORMAL, 
+        description="Desired response length: short, normal, or detailed"
+    )
     filters: Optional[Dict[str, Any]] = Field(
         None, description="Optional filters (ticker, date range, doc type)"
     )
@@ -378,6 +389,7 @@ class AgentState(BaseModel):
     """
     # Input
     original_query: str = Field(..., description="Original user query")
+    response_length: ResponseLength = Field(default=ResponseLength.NORMAL, description="Desired response length")
     filters: Optional[Dict[str, Any]] = Field(None, description="Query filters")
     
     # Router output
@@ -459,3 +471,55 @@ class EvaluationResult(BaseModel):
     generated_answer: str = Field(..., description="Model generated answer")
     metrics: Dict[str, float] = Field(..., description="Computed metrics")
     passed: bool = Field(..., description="Whether evaluation passed thresholds")
+
+
+# ============================================================================
+# Follow-Up Question Models
+# ============================================================================
+
+class FollowUpQuestion(BaseModel):
+    """A follow-up question generated from query context."""
+    id: str = Field(..., description="Unique question identifier")
+    text: str = Field(..., description="The follow-up question text")
+    category: Literal["temporal", "deeper", "comparative", "related"] = Field(
+        ..., description="Category of follow-up question"
+    )
+    relevant_chunk_ids: List[str] = Field(
+        default_factory=list, description="Chunk IDs that can answer this question"
+    )
+    requires_new_retrieval: bool = Field(
+        default=False, description="True for comparisons to other companies"
+    )
+
+
+class QueryResponseWithFollowUps(BaseModel):
+    """Extended response including follow-up questions."""
+    answer: str = Field(..., description="The generated answer")
+    citations: List[Citation] = Field(default_factory=list, description="Supporting citations")
+    reasoning_trace: Optional[List[Dict[str, Any]]] = Field(
+        None, description="Agent reasoning steps"
+    )
+    follow_up_questions: List[FollowUpQuestion] = Field(
+        default_factory=list, description="Generated follow-up questions"
+    )
+    query_id: str = Field(..., description="Query ID for follow-up execution reference")
+    processing_time_ms: int = Field(..., description="Total processing time")
+    confidence: float = Field(default=0.0, description="Response confidence score")
+    validation: Optional[ValidationResult] = Field(None, description="Validation results")
+    analyst_notebook: Optional[AnalystNotebook] = Field(None, description="Analyst notebook data")
+
+
+class FollowUpRequest(BaseModel):
+    """Request to execute a follow-up question."""
+    question_id: str = Field(..., description="The follow-up question ID")
+    question_text: str = Field(..., description="The follow-up question text")
+    parent_query_id: str = Field(..., description="ID of the parent query")
+
+
+class FollowUpResponse(BaseModel):
+    """Response from executing a follow-up question."""
+    question: str = Field(..., description="The follow-up question that was answered")
+    answer: str = Field(..., description="Short answer (3-5 sentences)")
+    citations: List[Citation] = Field(default_factory=list, description="Supporting citations")
+    execution_time_ms: int = Field(..., description="Total execution time in milliseconds")
+    used_cache: bool = Field(..., description="Whether cached chunks were used")
