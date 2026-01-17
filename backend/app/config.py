@@ -89,7 +89,39 @@ class Settings(BaseSettings):
     
     # Rate Limiting
     RATE_LIMIT_REQUESTS: int = Field(default=100, description="Requests per minute")
-    
+
+    # =========================================================================
+    # Observability & Tracing (LangSmith)
+    # =========================================================================
+    LANGCHAIN_TRACING_V2: bool = Field(
+        default=False,
+        description="Enable LangSmith tracing for observability"
+    )
+    LANGCHAIN_API_KEY: str = Field(
+        default="",
+        description="LangSmith API key for tracing"
+    )
+    LANGCHAIN_PROJECT: str = Field(
+        default="finagent",
+        description="LangSmith project name for trace grouping"
+    )
+    LANGCHAIN_ENDPOINT: str = Field(
+        default="https://api.smith.langchain.com",
+        description="LangSmith API endpoint"
+    )
+
+    # =========================================================================
+    # Evaluation Configuration
+    # =========================================================================
+    DEEPEVAL_API_KEY: str = Field(
+        default="",
+        description="DeepEval API key for evaluation dashboard"
+    )
+    EVALUATION_THRESHOLD: float = Field(
+        default=0.7,
+        description="Minimum score threshold for passing evaluation"
+    )
+
     model_config = {
         "env_file": Path(__file__).parent.parent / ".env",
         "env_file_encoding": "utf-8",
@@ -119,12 +151,36 @@ settings = get_settings()
 def validate_api_keys() -> dict:
     """
     Validate that required API keys are configured.
-    
+
     Returns:
         Dict with validation status for each required key
     """
     return {
         "openai": bool(settings.OPENAI_API_KEY),
         "cohere": bool(settings.COHERE_API_KEY),
-        "qdrant": bool(settings.QDRANT_API_KEY) or settings.QDRANT_HOST == "localhost"
+        "google": bool(settings.GOOGLE_API_KEY),
+        "qdrant": bool(settings.QDRANT_API_KEY) or settings.QDRANT_HOST == "localhost",
+        "langsmith": bool(settings.LANGCHAIN_API_KEY),
+        "deepeval": bool(settings.DEEPEVAL_API_KEY)
     }
+
+
+def setup_langsmith_tracing() -> bool:
+    """
+    Configure LangSmith tracing if API key is available.
+
+    Sets environment variables required by LangChain for tracing.
+
+    Returns:
+        True if tracing is enabled, False otherwise
+    """
+    import os
+
+    if settings.LANGCHAIN_API_KEY and settings.LANGCHAIN_TRACING_V2:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_API_KEY"] = settings.LANGCHAIN_API_KEY
+        os.environ["LANGCHAIN_PROJECT"] = settings.LANGCHAIN_PROJECT
+        os.environ["LANGCHAIN_ENDPOINT"] = settings.LANGCHAIN_ENDPOINT
+        return True
+
+    return False

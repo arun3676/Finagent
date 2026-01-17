@@ -1,7 +1,7 @@
 """
 Evaluation Metrics
 
-Implements metrics for evaluating RAG system performance:
+Implements metrics for evaluating RAG system performance using DeepEval.
 
 Retrieval Metrics:
 - Recall@K: Fraction of relevant docs in top K
@@ -9,18 +9,54 @@ Retrieval Metrics:
 - MRR: Mean Reciprocal Rank
 - NDCG: Normalized Discounted Cumulative Gain
 
-Generation Metrics:
+Generation Metrics (DeepEval):
 - Faithfulness: Is answer supported by sources?
 - Answer Relevance: Does answer address the question?
-- Context Relevance: Are retrieved docs relevant?
+- Contextual Precision: Are retrieved docs relevant and well-ranked?
 
 Usage:
+    # Retrieval metrics
     metrics = RetrievalMetrics()
     recall = metrics.recall_at_k(retrieved, relevant, k=5)
+
+    # Generation metrics (DeepEval)
+    gen_metrics = GenerationMetrics()
+    faithfulness = await gen_metrics.faithfulness(answer, contexts)
+
+DeepEval Integration:
+    # Run with pytest
+    pytest tests/evaluation/ -v
+
+    # Or use DeepEval CLI
+    deepeval test run tests/evaluation/
 """
 
 from typing import List, Dict, Any, Set, Optional
 import math
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+# Check if DeepEval is available
+DEEPEVAL_AVAILABLE = False
+try:
+    from deepeval import evaluate
+    from deepeval.metrics import (
+        FaithfulnessMetric,
+        AnswerRelevancyMetric,
+        ContextualPrecisionMetric,
+        ContextualRecallMetric,
+        HallucinationMetric,
+    )
+    from deepeval.test_case import LLMTestCase
+    DEEPEVAL_AVAILABLE = True
+    logger.info("DeepEval metrics loaded successfully")
+except ImportError:
+    logger.warning(
+        "DeepEval not installed. Generation metrics will use fallback implementations. "
+        "Install with: pip install deepeval"
+    )
 
 
 class RetrievalMetrics:
@@ -198,82 +234,386 @@ class RetrievalMetrics:
 
 class GenerationMetrics:
     """
-    Metrics for evaluating generation quality.
-    
-    Uses LLM-as-judge for semantic evaluation.
+    Metrics for evaluating generation quality using DeepEval.
+
+    Uses LLM-as-judge for semantic evaluation with industry-standard metrics:
+    - FaithfulnessMetric: Checks if answer is grounded in context
+    - AnswerRelevancyMetric: Checks if answer addresses the question
+    - ContextualPrecisionMetric: Checks if retrieved contexts are relevant
+
+    Requires: pip install deepeval
     """
-    
-    def __init__(self, judge_model: str = "gpt-4-turbo-preview"):
+
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        threshold: float = 0.7,
+        include_reason: bool = True
+    ):
         """
         Initialize generation metrics.
-        
+
         Args:
-            judge_model: LLM model to use as judge
+            model: LLM model to use as judge (default: gpt-4o-mini for cost efficiency)
+            threshold: Minimum score threshold for passing (default: 0.7)
+            include_reason: Include reasoning in metric output
         """
-        self.judge_model = judge_model
-    
+        self.model = model
+        self.threshold = threshold
+        self.include_reason = include_reason
+
+        # Initialize DeepEval metrics if available
+        if DEEPEVAL_AVAILABLE:
+            self._faithfulness_metric = FaithfulnessMetric(
+                threshold=threshold,
+                model=model,
+                include_reason=include_reason
+            )
+            self._relevancy_metric = AnswerRelevancyMetric(
+                threshold=threshold,
+                model=model,
+                include_reason=include_reason
+            )
+            self._contextual_precision_metric = ContextualPrecisionMetric(
+                threshold=threshold,
+                model=model,
+                include_reason=include_reason
+            )
+            self._contextual_recall_metric = ContextualRecallMetric(
+                threshold=threshold,
+                model=model,
+                include_reason=include_reason
+            )
+            self._hallucination_metric = HallucinationMetric(
+                threshold=threshold,
+                model=model,
+                include_reason=include_reason
+            )
+            logger.info(f"DeepEval metrics initialized with model={model}, threshold={threshold}")
+
     async def faithfulness(
         self,
         answer: str,
         contexts: List[str]
-    ) -> float:
+    ) -> Dict[str, Any]:
         """
-        Evaluate if answer is faithful to source contexts.
-        
-        Checks that all claims in answer are supported by contexts.
-        
+        Evaluate if answer is faithful to source contexts (grounded).
+
+        Uses DeepEval FaithfulnessMetric which:
+        1. Extracts claims from the answer
+        2. For each claim, verifies it's supported by the contexts
+        3. Returns the fraction of supported claims
+
         Args:
             answer: Generated answer
             contexts: Source context passages
-            
+
         Returns:
-            Faithfulness score (0 to 1)
+            Dict with score, passed, and reason
         """
-        # TODO: Implement LLM-based faithfulness evaluation
-        # 1. Extract claims from answer
-        # 2. For each claim, check if supported by contexts
-        # 3. Return fraction of supported claims
-        raise NotImplementedError("Faithfulness evaluation not yet implemented")
-    
+        if not DEEPEVAL_AVAILABLE:
+            return self._fallback_faithfulness(answer, contexts)
+
+        try:
+            test_case = LLMTestCase(
+                input="",  # Not needed for faithfulness
+                actual_output=answer,
+                retrieval_context=contexts
+            )
+
+            self._faithfulness_metric.measure(test_case)
+
+            return {
+                "score": self._faithfulness_metric.score,
+                "passed": self._faithfulness_metric.is_successful(),
+                "reason": self._faithfulness_metric.reason if self.include_reason else None,
+                "metric": "faithfulness"
+            }
+        except Exception as e:
+            logger.error(f"Faithfulness evaluation failed: {e}")
+            return {"score": 0.0, "passed": False, "reason": str(e), "metric": "faithfulness"}
+
     async def answer_relevance(
         self,
         question: str,
-        answer: str
-    ) -> float:
+        answer: str,
+        contexts: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         """
         Evaluate if answer is relevant to the question.
-        
+
+        Uses DeepEval AnswerRelevancyMetric which:
+        1. Generates N hypothetical questions from the answer
+        2. Measures semantic similarity between generated questions and original
+        3. Returns average similarity score
+
         Args:
             question: Original question
             answer: Generated answer
-            
+            contexts: Optional retrieval contexts
+
         Returns:
-            Relevance score (0 to 1)
+            Dict with score, passed, and reason
         """
-        # TODO: Implement LLM-based relevance evaluation
-        # 1. Ask LLM to rate how well answer addresses question
-        # 2. Parse and return score
-        raise NotImplementedError("Answer relevance evaluation not yet implemented")
-    
-    async def context_relevance(
+        if not DEEPEVAL_AVAILABLE:
+            return self._fallback_relevance(question, answer)
+
+        try:
+            test_case = LLMTestCase(
+                input=question,
+                actual_output=answer,
+                retrieval_context=contexts or []
+            )
+
+            self._relevancy_metric.measure(test_case)
+
+            return {
+                "score": self._relevancy_metric.score,
+                "passed": self._relevancy_metric.is_successful(),
+                "reason": self._relevancy_metric.reason if self.include_reason else None,
+                "metric": "answer_relevance"
+            }
+        except Exception as e:
+            logger.error(f"Answer relevance evaluation failed: {e}")
+            return {"score": 0.0, "passed": False, "reason": str(e), "metric": "answer_relevance"}
+
+    async def contextual_precision(
         self,
         question: str,
-        contexts: List[str]
-    ) -> float:
+        answer: str,
+        contexts: List[str],
+        expected_output: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        Evaluate if retrieved contexts are relevant to question.
-        
+        Evaluate if retrieved contexts are relevant and well-ranked.
+
+        Uses DeepEval ContextualPrecisionMetric which:
+        1. Checks if relevant contexts appear before irrelevant ones
+        2. Penalizes irrelevant contexts that rank highly
+        3. Returns precision score accounting for ranking
+
         Args:
             question: Original question
-            contexts: Retrieved context passages
-            
+            answer: Generated answer
+            contexts: Retrieved context passages (in ranked order)
+            expected_output: Optional expected/reference answer
+
         Returns:
-            Context relevance score (0 to 1)
+            Dict with score, passed, and reason
         """
-        # TODO: Implement context relevance evaluation
-        # 1. For each context, check relevance to question
-        # 2. Return average relevance
-        raise NotImplementedError("Context relevance evaluation not yet implemented")
+        if not DEEPEVAL_AVAILABLE:
+            return self._fallback_context_relevance(question, contexts)
+
+        try:
+            test_case = LLMTestCase(
+                input=question,
+                actual_output=answer,
+                retrieval_context=contexts,
+                expected_output=expected_output or answer  # Use answer as reference if not provided
+            )
+
+            self._contextual_precision_metric.measure(test_case)
+
+            return {
+                "score": self._contextual_precision_metric.score,
+                "passed": self._contextual_precision_metric.is_successful(),
+                "reason": self._contextual_precision_metric.reason if self.include_reason else None,
+                "metric": "contextual_precision"
+            }
+        except Exception as e:
+            logger.error(f"Contextual precision evaluation failed: {e}")
+            return {"score": 0.0, "passed": False, "reason": str(e), "metric": "contextual_precision"}
+
+    async def contextual_recall(
+        self,
+        question: str,
+        answer: str,
+        contexts: List[str],
+        expected_output: str
+    ) -> Dict[str, Any]:
+        """
+        Evaluate if contexts contain all information needed for the expected answer.
+
+        Uses DeepEval ContextualRecallMetric which:
+        1. Extracts claims from expected output
+        2. Checks if each claim can be attributed to a context
+        3. Returns fraction of attributable claims
+
+        Args:
+            question: Original question
+            answer: Generated answer
+            contexts: Retrieved context passages
+            expected_output: Expected/reference answer
+
+        Returns:
+            Dict with score, passed, and reason
+        """
+        if not DEEPEVAL_AVAILABLE:
+            return {"score": 0.0, "passed": False, "reason": "DeepEval not installed", "metric": "contextual_recall"}
+
+        try:
+            test_case = LLMTestCase(
+                input=question,
+                actual_output=answer,
+                retrieval_context=contexts,
+                expected_output=expected_output
+            )
+
+            self._contextual_recall_metric.measure(test_case)
+
+            return {
+                "score": self._contextual_recall_metric.score,
+                "passed": self._contextual_recall_metric.is_successful(),
+                "reason": self._contextual_recall_metric.reason if self.include_reason else None,
+                "metric": "contextual_recall"
+            }
+        except Exception as e:
+            logger.error(f"Contextual recall evaluation failed: {e}")
+            return {"score": 0.0, "passed": False, "reason": str(e), "metric": "contextual_recall"}
+
+    async def hallucination(
+        self,
+        answer: str,
+        contexts: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Detect hallucinations in the answer.
+
+        Uses DeepEval HallucinationMetric which:
+        1. Identifies claims in the answer not supported by contexts
+        2. Returns hallucination score (lower is better)
+
+        Args:
+            answer: Generated answer
+            contexts: Source context passages
+
+        Returns:
+            Dict with score (0 = no hallucination), passed, and reason
+        """
+        if not DEEPEVAL_AVAILABLE:
+            return {"score": 1.0, "passed": False, "reason": "DeepEval not installed", "metric": "hallucination"}
+
+        try:
+            test_case = LLMTestCase(
+                input="",
+                actual_output=answer,
+                context=contexts
+            )
+
+            self._hallucination_metric.measure(test_case)
+
+            return {
+                "score": self._hallucination_metric.score,
+                "passed": self._hallucination_metric.is_successful(),
+                "reason": self._hallucination_metric.reason if self.include_reason else None,
+                "metric": "hallucination"
+            }
+        except Exception as e:
+            logger.error(f"Hallucination detection failed: {e}")
+            return {"score": 1.0, "passed": False, "reason": str(e), "metric": "hallucination"}
+
+    async def evaluate_response(
+        self,
+        question: str,
+        answer: str,
+        contexts: List[str],
+        expected_output: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Run all metrics on a response and return comprehensive evaluation.
+
+        Args:
+            question: Original question
+            answer: Generated answer
+            contexts: Retrieved context passages
+            expected_output: Optional expected/reference answer
+
+        Returns:
+            Dict with all metric scores and overall assessment
+        """
+        results = {}
+
+        # Run all metrics
+        results["faithfulness"] = await self.faithfulness(answer, contexts)
+        results["answer_relevance"] = await self.answer_relevance(question, answer, contexts)
+        results["contextual_precision"] = await self.contextual_precision(
+            question, answer, contexts, expected_output
+        )
+
+        if expected_output:
+            results["contextual_recall"] = await self.contextual_recall(
+                question, answer, contexts, expected_output
+            )
+
+        # Calculate overall score
+        scores = [r["score"] for r in results.values() if r.get("score") is not None]
+        overall_score = sum(scores) / len(scores) if scores else 0.0
+        all_passed = all(r.get("passed", False) for r in results.values())
+
+        return {
+            "metrics": results,
+            "overall_score": overall_score,
+            "all_passed": all_passed,
+            "threshold": self.threshold
+        }
+
+    # Fallback implementations when DeepEval is not available
+    def _fallback_faithfulness(self, answer: str, contexts: List[str]) -> Dict[str, Any]:
+        """Simple keyword overlap fallback for faithfulness."""
+        if not contexts:
+            return {"score": 0.0, "passed": False, "reason": "No contexts provided", "metric": "faithfulness"}
+
+        answer_words = set(answer.lower().split())
+        context_words = set()
+        for ctx in contexts:
+            context_words.update(ctx.lower().split())
+
+        overlap = len(answer_words & context_words)
+        score = overlap / len(answer_words) if answer_words else 0.0
+
+        return {
+            "score": min(score, 1.0),
+            "passed": score >= self.threshold,
+            "reason": "Fallback: keyword overlap (install deepeval for LLM-based evaluation)",
+            "metric": "faithfulness"
+        }
+
+    def _fallback_relevance(self, question: str, answer: str) -> Dict[str, Any]:
+        """Simple keyword overlap fallback for relevance."""
+        question_words = set(question.lower().split())
+        answer_words = set(answer.lower().split())
+
+        overlap = len(question_words & answer_words)
+        score = overlap / len(question_words) if question_words else 0.0
+
+        return {
+            "score": min(score, 1.0),
+            "passed": score >= self.threshold,
+            "reason": "Fallback: keyword overlap (install deepeval for LLM-based evaluation)",
+            "metric": "answer_relevance"
+        }
+
+    def _fallback_context_relevance(self, question: str, contexts: List[str]) -> Dict[str, Any]:
+        """Simple keyword overlap fallback for context relevance."""
+        if not contexts:
+            return {"score": 0.0, "passed": False, "reason": "No contexts provided", "metric": "contextual_precision"}
+
+        question_words = set(question.lower().split())
+        scores = []
+
+        for ctx in contexts:
+            ctx_words = set(ctx.lower().split())
+            overlap = len(question_words & ctx_words)
+            scores.append(overlap / len(question_words) if question_words else 0.0)
+
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+
+        return {
+            "score": min(avg_score, 1.0),
+            "passed": avg_score >= self.threshold,
+            "reason": "Fallback: keyword overlap (install deepeval for LLM-based evaluation)",
+            "metric": "contextual_precision"
+        }
     
     def answer_similarity(
         self,
